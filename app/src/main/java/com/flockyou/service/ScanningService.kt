@@ -17,30 +17,19 @@ import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import android.provider.Settings
 import com.flockyou.BuildConfig
 import com.flockyou.MainActivity
 import com.flockyou.R
-import com.flockyou.ui.EmergencyAlertActivity
 import com.flockyou.data.model.*
 import com.flockyou.data.repository.DetectionRepository
-import com.flockyou.data.repository.FlockYouDatabase
 import com.flockyou.detection.DetectionRegistry
-import com.flockyou.detection.handler.BleDetectionContext
 import com.flockyou.detection.handler.BleDetectionHandler
-import com.flockyou.detection.handler.BleDetectionResult
 import com.flockyou.detection.handler.CellularDetectionHandler
-import com.flockyou.detection.handler.SatelliteDetectionContext
 import com.flockyou.detection.handler.SatelliteDetectionHandler
 import com.google.android.gms.location.*
 import com.google.gson.Gson
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
@@ -51,238 +40,100 @@ private const val WAKE_LOCK_TAG = "FlockYou:ScanningWakeLock"
 
 /**
  * Foreground service that continuously scans for surveillance devices
- * using both Bluetooth LE and WiFi
+ * using both Bluetooth LE and WiFi.
+ *
+ * This file contains the service lifecycle, core scan loop, BLE/WiFi scanning,
+ * health management, battery monitoring, and nuke handling.
+ *
+ * Related files (extension functions on this class):
+ * - ScanningServiceBroadcaster.kt: All IPC broadcast methods
+ * - SubsystemManager.kt: Start/stop logic for 6 subsystems (Cellular, Satellite, Rogue WiFi, RF, Ultrasonic, GNSS)
+ * - DetectionProcessor.kt: Detection result handling, alerts, automation broadcasts, handler delegation
+ * - ScanningServiceState.kt: Shared state flows (companion object state)
+ * - ScanningServiceModels.kt: Data classes (ScanConfig, SeenDevice, ScanStatus, etc.)
+ * - ScanningServiceIpc.kt: IPC constants and client-side connection
  */
 @AndroidEntryPoint
 class ScanningService : Service() {
-    
+
     companion object {
         private const val TAG = "ScanningService"
         private const val NOTIFICATION_ID = 1001
-        private const val SATELLITE_CONNECTION_NOTIF_ID = 9999
-        private const val CHANNEL_ID = "flockyou_scanning"
+        internal const val SATELLITE_CONNECTION_NOTIF_ID = 9999
+        internal const val CHANNEL_ID = "flockyou_scanning"
 
-        // Broadcast actions for cross-process communication
-        const val ACTION_NUKE_INITIATED = "com.flockyou.NUKE_INITIATED"
-        const val ACTION_DATABASE_SHUTDOWN = "com.flockyou.DATABASE_SHUTDOWN"
-
-        // Flag to track if database is available (set to false during nuke)
-        val isDatabaseAvailable = MutableStateFlow(true)
-
-        // Default values (can be overridden by settings)
-        // Aggressive burst scan pattern: 25s on, 5s cooldown to prevent thermal throttling
-        private const val DEFAULT_WIFI_SCAN_INTERVAL = 25000L  // 25 seconds between WiFi scans (more frequent)
-        private const val DEFAULT_BLE_SCAN_DURATION = 25000L   // 25 seconds of low-latency scanning
-        private const val DEFAULT_BLE_COOLDOWN = 4000L         // 4 seconds cooldown for faster cycle
-        private const val DEFAULT_INACTIVE_TIMEOUT = 60000L
-        private const val DEFAULT_SEEN_DEVICE_TIMEOUT = 300000L
-
-        // Current configured values
-        val currentSettings = MutableStateFlow(ScanConfig())
-
-        // IMPORTANT: Process Isolation Note
-        // This service runs in a separate process (":scanning" as declared in AndroidManifest.xml).
-        // These static MutableStateFlows are process-local - they will have different instances
-        // in the main app process vs the :scanning process. State synchronization between
-        // processes is handled via the Messenger-based IPC mechanism (ipcMessenger, broadcastToClients).
-        // Direct access to these flows from the UI will return stale/default values.
-        // UI components should use the IPC bridge (ScanningServiceIpc) to get real-time state.
-        val isScanning = MutableStateFlow(false)
-        val lastDetection = MutableStateFlow<Detection?>(null)
-        val detectionCount = MutableStateFlow(0)
-
-        // Status tracking (see process isolation note above)
-        val scanStatus = MutableStateFlow<ScanStatus>(ScanStatus.Idle)
-        val bleStatus = MutableStateFlow<SubsystemStatus>(SubsystemStatus.Idle)
-        val wifiStatus = MutableStateFlow<SubsystemStatus>(SubsystemStatus.Idle)
-        val locationStatus = MutableStateFlow<SubsystemStatus>(SubsystemStatus.Idle)
-        val cellularStatus = MutableStateFlow<SubsystemStatus>(SubsystemStatus.Idle)
-        val errorLog = MutableStateFlow<List<ScanError>>(emptyList())
-        
-        // Seen but unmatched devices
-        val seenBleDevices = MutableStateFlow<List<SeenDevice>>(emptyList())
-        val seenWifiNetworks = MutableStateFlow<List<SeenDevice>>(emptyList())
-        
-        // Cellular monitoring data
-        val cellStatus = MutableStateFlow<CellularMonitor.CellStatus?>(null)
-        val seenCellTowers = MutableStateFlow<List<CellularMonitor.SeenCellTower>>(emptyList())
-        val cellularAnomalies = MutableStateFlow<List<CellularMonitor.CellularAnomaly>>(emptyList())
-        val cellularEvents = MutableStateFlow<List<CellularMonitor.CellularEvent>>(emptyList())
-        
-        // Satellite monitoring data
-        val satelliteState = MutableStateFlow<com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState?>(null)
-        val satelliteAnomalies = MutableStateFlow<List<com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly>>(emptyList())
-        val satelliteHistory = MutableStateFlow<List<com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionEvent>>(emptyList())
-        val satelliteStatus = MutableStateFlow<SubsystemStatus>(SubsystemStatus.Idle)
-
-        // Rogue WiFi monitoring data
-        val rogueWifiStatus = MutableStateFlow<RogueWifiMonitor.WifiEnvironmentStatus?>(null)
-        val rogueWifiAnomalies = MutableStateFlow<List<RogueWifiMonitor.WifiAnomaly>>(emptyList())
-        val rogueWifiEvents = MutableStateFlow<List<RogueWifiMonitor.WifiEvent>>(emptyList())
-        val suspiciousNetworks = MutableStateFlow<List<RogueWifiMonitor.SuspiciousNetwork>>(emptyList())
-
-        // RF signal analysis data
-        val rfStatus = MutableStateFlow<RfSignalAnalyzer.RfEnvironmentStatus?>(null)
-        val rfAnomalies = MutableStateFlow<List<RfSignalAnalyzer.RfAnomaly>>(emptyList())
-        val rfEvents = MutableStateFlow<List<RfSignalAnalyzer.RfEvent>>(emptyList())
-        val detectedDrones = MutableStateFlow<List<RfSignalAnalyzer.DroneInfo>>(emptyList())
-
-        // Ultrasonic detection data
-        val ultrasonicStatus = MutableStateFlow<UltrasonicDetector.UltrasonicStatus?>(null)
-        val ultrasonicAnomalies = MutableStateFlow<List<UltrasonicDetector.UltrasonicAnomaly>>(emptyList())
-        val ultrasonicEvents = MutableStateFlow<List<UltrasonicDetector.UltrasonicEvent>>(emptyList())
-        val ultrasonicBeacons = MutableStateFlow<List<UltrasonicDetector.BeaconDetection>>(emptyList())
-
-        // GNSS satellite monitoring data
-        val gnssStatus = MutableStateFlow<com.flockyou.monitoring.GnssSatelliteMonitor.GnssEnvironmentStatus?>(null)
-        val gnssSatellites = MutableStateFlow<List<com.flockyou.monitoring.GnssSatelliteMonitor.SatelliteInfo>>(emptyList())
-        val gnssAnomalies = MutableStateFlow<List<com.flockyou.monitoring.GnssSatelliteMonitor.GnssAnomaly>>(emptyList())
-        val gnssEvents = MutableStateFlow<List<com.flockyou.monitoring.GnssSatelliteMonitor.GnssEvent>>(emptyList())
-        val gnssMeasurements = MutableStateFlow<com.flockyou.monitoring.GnssSatelliteMonitor.GnssMeasurementData?>(null)
-        val gnssMonitorStatus = MutableStateFlow<SubsystemStatus>(SubsystemStatus.Idle)
-
-        // Detector health tracking for all subsystems
-        val detectorHealth = MutableStateFlow<Map<String, DetectorHealthStatus>>(emptyMap())
-
-        // Battery-adaptive scanning mode
-        val currentBatteryMode = MutableStateFlow(com.flockyou.data.BatteryAdaptiveMode.BALANCED)
-        val currentBatteryLevel = MutableStateFlow(100)
-        val isBatteryCharging = MutableStateFlow(false)
+        // Delegations to ScanningServiceState for backward compatibility.
+        // New code should use ScanningServiceState directly.
+        const val ACTION_NUKE_INITIATED = ScanningServiceState.ACTION_NUKE_INITIATED
+        const val ACTION_DATABASE_SHUTDOWN = ScanningServiceState.ACTION_DATABASE_SHUTDOWN
+        val isDatabaseAvailable get() = ScanningServiceState.isDatabaseAvailable
+        val currentSettings get() = ScanningServiceState.currentSettings
+        val isScanning get() = ScanningServiceState.isScanning
+        val lastDetection get() = ScanningServiceState.lastDetection
+        val detectionCount get() = ScanningServiceState.detectionCount
+        val scanStatus get() = ScanningServiceState.scanStatus
+        val bleStatus get() = ScanningServiceState.bleStatus
+        val wifiStatus get() = ScanningServiceState.wifiStatus
+        val locationStatus get() = ScanningServiceState.locationStatus
+        val cellularStatus get() = ScanningServiceState.cellularStatus
+        val errorLog get() = ScanningServiceState.errorLog
+        val seenBleDevices get() = ScanningServiceState.seenBleDevices
+        val seenWifiNetworks get() = ScanningServiceState.seenWifiNetworks
+        val cellStatus get() = ScanningServiceState.cellStatus
+        val seenCellTowers get() = ScanningServiceState.seenCellTowers
+        val cellularAnomalies get() = ScanningServiceState.cellularAnomalies
+        val cellularEvents get() = ScanningServiceState.cellularEvents
+        val satelliteState get() = ScanningServiceState.satelliteState
+        val satelliteAnomalies get() = ScanningServiceState.satelliteAnomalies
+        val satelliteHistory get() = ScanningServiceState.satelliteHistory
+        val satelliteStatus get() = ScanningServiceState.satelliteStatus
+        val rogueWifiStatus get() = ScanningServiceState.rogueWifiStatus
+        val rogueWifiAnomalies get() = ScanningServiceState.rogueWifiAnomalies
+        val rogueWifiEvents get() = ScanningServiceState.rogueWifiEvents
+        val suspiciousNetworks get() = ScanningServiceState.suspiciousNetworks
+        val rfStatus get() = ScanningServiceState.rfStatus
+        val rfAnomalies get() = ScanningServiceState.rfAnomalies
+        val rfEvents get() = ScanningServiceState.rfEvents
+        val detectedDrones get() = ScanningServiceState.detectedDrones
+        val ultrasonicStatus get() = ScanningServiceState.ultrasonicStatus
+        val ultrasonicAnomalies get() = ScanningServiceState.ultrasonicAnomalies
+        val ultrasonicEvents get() = ScanningServiceState.ultrasonicEvents
+        val ultrasonicBeacons get() = ScanningServiceState.ultrasonicBeacons
+        val gnssStatus get() = ScanningServiceState.gnssStatus
+        val gnssSatellites get() = ScanningServiceState.gnssSatellites
+        val gnssAnomalies get() = ScanningServiceState.gnssAnomalies
+        val gnssEvents get() = ScanningServiceState.gnssEvents
+        val gnssMeasurements get() = ScanningServiceState.gnssMeasurements
+        val gnssMonitorStatus get() = ScanningServiceState.gnssMonitorStatus
+        val detectorHealth get() = ScanningServiceState.detectorHealth
+        val currentBatteryMode get() = ScanningServiceState.currentBatteryMode
+        val currentBatteryLevel get() = ScanningServiceState.currentBatteryLevel
+        val isBatteryCharging get() = ScanningServiceState.isBatteryCharging
+        val scanStats get() = ScanningServiceState.scanStats
+        val detectionRefreshEvent get() = ScanningServiceState.detectionRefreshEvent
+        val learningModeEnabled get() = ScanningServiceState.learningModeEnabled
+        val learnedSignatures get() = ScanningServiceState.learnedSignatures
+        val highActivityDevices get() = ScanningServiceState.highActivityDevices
 
         // Constants for health monitoring
         private const val MAX_CONSECUTIVE_FAILURES = 5
         private const val MAX_RESTART_ATTEMPTS = 5
-        private const val HEALTH_CHECK_INTERVAL_MS = 30_000L // 30 seconds
-        private const val DETECTOR_STALE_THRESHOLD_MS = 120_000L // 2 minutes without scan = stale
-        private const val BLE_HEALTH_UPDATE_THROTTLE_MS = 5_000L // Throttle BLE health updates to every 5 seconds
-        private const val BLE_WATCHDOG_THRESHOLD_MS = 60_000L // 1 minute without ANY BLE results = trigger restart
-        private const val BLE_WATCHDOG_MAX_FAILURES = 3 // Max watchdog failures before giving up
+        private const val HEALTH_CHECK_INTERVAL_MS = 30_000L
+        private const val DETECTOR_STALE_THRESHOLD_MS = 120_000L
+        private const val BLE_HEALTH_UPDATE_THROTTLE_MS = 5_000L
+        private const val BLE_WATCHDOG_THRESHOLD_MS = 60_000L
+        private const val BLE_WATCHDOG_MAX_FAILURES = 3
 
-        // Scan statistics
-        val scanStats = MutableStateFlow(ScanStatistics())
-
-        // Detection refresh event - emits when detections are added/updated
-        // This ensures UI updates even if Room's Flow emissions fail with SQLCipher
-        private val _detectionRefreshEvent = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
-        val detectionRefreshEvent: SharedFlow<Unit> = _detectionRefreshEvent.asSharedFlow()
-
-        // Learning mode - for capturing unknown device signatures
-        val learningModeEnabled = MutableStateFlow(false)
-        val learnedSignatures = MutableStateFlow<List<LearnedSignature>>(emptyList())
-
-        // Packet rate tracking for Signal trigger detection (advertising spike detection)
-        private val devicePacketCounts = java.util.concurrent.ConcurrentHashMap<String, MutableList<Long>>()  // MAC -> timestamps
-        private val packetCountsLock = Any()  // Lock for thread-safe list modification
-        val highActivityDevices = MutableStateFlow<List<String>>(emptyList())  // MACs with advertising spikes
-
-        private const val MAX_ERROR_LOG_SIZE = 50
-        private const val MAX_SEEN_DEVICES = 100
-        private const val PACKET_RATE_WINDOW_MS = 5000L  // 5 second window for rate calculation
-        private const val HIGH_ACTIVITY_THRESHOLD = 20f  // 20+ packets/second = Signal trigger likely active
-
-        // Lock for thread-safe modification of seen device lists
-        private val seenDevicesLock = Any()
-
-        fun clearErrors() {
-            errorLog.value = emptyList()
-        }
-
-        fun clearSeenDevices() {
-            seenBleDevices.value = emptyList()
-            seenWifiNetworks.value = emptyList()
-        }
-
-        /**
-         * Enable learning mode to capture device signatures
-         */
-        fun enableLearningMode() {
-            learningModeEnabled.value = true
-        }
-
-        /**
-         * Disable learning mode
-         */
-        fun disableLearningMode() {
-            learningModeEnabled.value = false
-        }
-
-        /**
-         * Learn a device signature from a seen device
-         */
-        fun learnDeviceSignature(device: SeenDevice, notes: String? = null) {
-            val signature = LearnedSignature(
-                id = device.id,
-                name = device.name,
-                macPrefix = device.id.take(8).uppercase(),
-                serviceUuids = device.serviceUuids,
-                manufacturerIds = device.manufacturerData.keys.toList(),
-                notes = notes
-            )
-
-            val current = learnedSignatures.value.toMutableList()
-            // Remove existing signature for same device if present
-            current.removeAll { it.id == device.id }
-            current.add(0, signature)
-            learnedSignatures.value = current
-        }
-
-        /**
-         * Clear all learned signatures
-         */
-        fun clearLearnedSignatures() {
-            learnedSignatures.value = emptyList()
-        }
-
-        /**
-         * Track packet for advertising rate calculation
-         */
-        fun trackPacket(macAddress: String): Float {
-            val now = System.currentTimeMillis()
-            val cutoff = now - PACKET_RATE_WINDOW_MS
-
-            val rate = synchronized(packetCountsLock) {
-                val packets = devicePacketCounts.getOrPut(macAddress) { mutableListOf() }
-                packets.add(now)
-
-                // Remove old packets outside the window - use iterator for safe removal
-                val iterator = packets.iterator()
-                while (iterator.hasNext()) {
-                    if (iterator.next() < cutoff) {
-                        iterator.remove()
-                    }
-                }
-
-                // Calculate rate
-                if (packets.size > 1) {
-                    packets.size.toFloat() / (PACKET_RATE_WINDOW_MS / 1000f)
-                } else {
-                    0f
-                }
-            }
-
-            // Check for high activity (potential Signal trigger activation)
-            if (rate >= HIGH_ACTIVITY_THRESHOLD) {
-                val current = highActivityDevices.value.toMutableList()
-                if (!current.contains(macAddress)) {
-                    current.add(macAddress)
-                    highActivityDevices.value = current
-                }
-            }
-
-            return rate
-        }
-        
-        fun clearCellularHistory() {
-            seenCellTowers.value = emptyList()
-            cellularAnomalies.value = emptyList()
-            cellularEvents.value = emptyList()
-        }
-        
-        fun clearSatelliteHistory() {
-            satelliteAnomalies.value = emptyList()
-            satelliteHistory.value = emptyList()
-        }
-        
+        fun clearErrors() = ScanningServiceState.clearErrors()
+        fun clearSeenDevices() = ScanningServiceState.clearSeenDevices()
+        fun enableLearningMode() = ScanningServiceState.enableLearningMode()
+        fun disableLearningMode() = ScanningServiceState.disableLearningMode()
+        fun learnDeviceSignature(device: SeenDevice, notes: String? = null) =
+            ScanningServiceState.learnDeviceSignature(device, notes)
+        fun clearLearnedSignatures() = ScanningServiceState.clearLearnedSignatures()
+        fun trackPacket(macAddress: String) = ScanningServiceState.trackPacket(macAddress)
+        fun clearCellularHistory() = ScanningServiceState.clearCellularHistory()
+        fun clearSatelliteHistory() = ScanningServiceState.clearSatelliteHistory()
         fun updateSettings(
             wifiIntervalSeconds: Int = 35,
             bleDurationSeconds: Int = 10,
@@ -292,196 +143,14 @@ class ScanningService : Service() {
             enableWifi: Boolean = true,
             enableCellular: Boolean = true,
             trackSeenDevices: Boolean = true
-        ) {
-            currentSettings.value = ScanConfig(
-                wifiScanInterval = wifiIntervalSeconds * 1000L,
-                bleScanDuration = bleDurationSeconds * 1000L,
-                inactiveTimeout = inactiveTimeoutSeconds * 1000L,
-                seenDeviceTimeout = seenDeviceTimeoutMinutes * 60 * 1000L,
-                enableBle = enableBle,
-                enableWifi = enableWifi,
-                enableCellular = enableCellular,
-                trackSeenDevices = trackSeenDevices
-            )
-        }
-
-        /**
-         * Forcefully stop the scanning service and prevent auto-restart.
-         * This completely stops all scanning operations.
-         */
-        fun forceStop(context: Context) {
-            Log.w(TAG, "Force stopping scanning service")
-
-            // Reset all state
-            isScanning.value = false
-            scanStatus.value = ScanStatus.Idle
-            bleStatus.value = SubsystemStatus.Idle
-            wifiStatus.value = SubsystemStatus.Idle
-            locationStatus.value = SubsystemStatus.Idle
-            cellularStatus.value = SubsystemStatus.Idle
-            satelliteStatus.value = SubsystemStatus.Idle
-
-            // Stop the service
-            val intent = Intent(context, ScanningService::class.java)
-            context.stopService(intent)
-        }
-    }
-    
-    /** Runtime scan configuration */
-    data class ScanConfig(
-        val wifiScanInterval: Long = DEFAULT_WIFI_SCAN_INTERVAL,
-        val bleScanDuration: Long = DEFAULT_BLE_SCAN_DURATION,
-        val bleCooldown: Long = DEFAULT_BLE_COOLDOWN,
-        val inactiveTimeout: Long = DEFAULT_INACTIVE_TIMEOUT,
-        val seenDeviceTimeout: Long = DEFAULT_SEEN_DEVICE_TIMEOUT,
-        val enableBle: Boolean = true,
-        val enableWifi: Boolean = true,
-        val enableCellular: Boolean = true,
-        val trackSeenDevices: Boolean = true,
-        val aggressiveBleMode: Boolean = true  // Use MATCH_MODE_AGGRESSIVE for weak signal detection
-    )
-    
-    /** Seen device that didn't match surveillance patterns */
-    data class SeenDevice(
-        val id: String, // MAC or BSSID
-        val name: String?,
-        val type: String, // "BLE" or "WiFi"
-        val rssi: Int,
-        val firstSeen: Long = System.currentTimeMillis(),
-        val lastSeen: Long = System.currentTimeMillis(),
-        val seenCount: Int = 1,
-        val manufacturer: String? = null,
-        val serviceUuids: List<String> = emptyList(),
-        val manufacturerData: Map<Int, String> = emptyMap(), // Manufacturer ID -> hex data
-        val advertisingRate: Float = 0f  // Packets per second (for Signal trigger detection)
-    )
-
-    /** Learned device signature (user-confirmed suspicious device) */
-    data class LearnedSignature(
-        val id: String,
-        val name: String?,
-        val macPrefix: String, // First 3 octets
-        val serviceUuids: List<String>,
-        val manufacturerIds: List<Int>,
-        val learnedAt: Long = System.currentTimeMillis(),
-        val notes: String? = null
-    )
-    
-    /** Scan statistics */
-    data class ScanStatistics(
-        val totalBleScans: Int = 0,
-        val totalWifiScans: Int = 0,
-        val successfulWifiScans: Int = 0,
-        val throttledWifiScans: Int = 0,
-        val bleDevicesSeen: Int = 0,
-        val wifiNetworksSeen: Int = 0,
-        val detectionsCreated: Int = 0,
-        val lastBleSuccessTime: Long? = null,
-        val lastWifiSuccessTime: Long? = null
-    )
-    
-    /** Overall scanning status */
-    sealed class ScanStatus {
-        object Idle : ScanStatus()
-        object Starting : ScanStatus()
-        object Active : ScanStatus()
-        object Stopping : ScanStatus()
-        data class Error(val message: String, val recoverable: Boolean = true) : ScanStatus()
-
-        /** Convert to IPC-friendly string representation */
-        fun toIpcString(): String = when (this) {
-            is Idle -> "Idle"
-            is Starting -> "Starting"
-            is Active -> "Active"
-            is Stopping -> "Stopping"
-            is Error -> "Error:${this.message}"
-        }
-
-        companion object {
-            /** Parse IPC string back to ScanStatus */
-            fun fromIpcString(str: String): ScanStatus = when {
-                str == "Idle" -> Idle
-                str == "Starting" -> Starting
-                str == "Active" -> Active
-                str == "Stopping" -> Stopping
-                str.startsWith("Error:") -> Error(str.removePrefix("Error:"))
-                else -> Idle
-            }
-        }
-    }
-    
-    /** Individual subsystem status */
-    sealed class SubsystemStatus {
-        object Idle : SubsystemStatus()
-        object Active : SubsystemStatus()
-        object Disabled : SubsystemStatus()
-        data class Error(val code: Int, val message: String) : SubsystemStatus()
-        data class PermissionDenied(val permission: String) : SubsystemStatus()
-
-        /** Convert to IPC-friendly string representation */
-        fun toIpcString(): String = when (this) {
-            is Idle -> "Idle"
-            is Active -> "Active"
-            is Disabled -> "Disabled"
-            is Error -> "Error:${this.code}:${this.message}"
-            is PermissionDenied -> "PermissionDenied:${this.permission}"
-        }
-
-        companion object {
-            /** Parse IPC string back to SubsystemStatus */
-            fun fromIpcString(str: String): SubsystemStatus = when {
-                str == "Idle" -> Idle
-                str == "Active" -> Active
-                str == "Disabled" -> Disabled
-                str.startsWith("Error:") -> {
-                    val parts = str.removePrefix("Error:").split(":", limit = 2)
-                    Error(parts.getOrNull(0)?.toIntOrNull() ?: -1, parts.getOrElse(1) { "Unknown" })
-                }
-                str.startsWith("PermissionDenied:") -> PermissionDenied(str.removePrefix("PermissionDenied:"))
-                else -> Idle
-            }
-        }
+        ) = ScanningServiceState.updateSettings(
+            wifiIntervalSeconds, bleDurationSeconds, inactiveTimeoutSeconds,
+            seenDeviceTimeoutMinutes, enableBle, enableWifi, enableCellular, trackSeenDevices
+        )
+        fun forceStop(context: Context) = ScanningServiceState.forceStop(context)
     }
 
-    /** Error log entry */
-    data class ScanError(
-        val timestamp: Long = System.currentTimeMillis(),
-        val subsystem: String,
-        val code: Int,
-        val message: String,
-        val recoverable: Boolean = true
-    )
-
-    /** Detector health status for monitoring individual detector subsystems */
-    data class DetectorHealthStatus(
-        val name: String,
-        val isRunning: Boolean = false,
-        val lastSuccessfulScan: Long? = null,
-        val consecutiveFailures: Int = 0,
-        val lastError: String? = null,
-        val lastErrorTime: Long? = null,
-        val restartCount: Int = 0,
-        val isHealthy: Boolean = true
-    ) {
-        companion object {
-            const val DETECTOR_ULTRASONIC = "Ultrasonic"
-            const val DETECTOR_ROGUE_WIFI = "RogueWiFi"
-            const val DETECTOR_RF_SIGNAL = "RfSignal"
-            const val DETECTOR_CELLULAR = "Cellular"
-            const val DETECTOR_GNSS = "GNSS"
-            const val DETECTOR_SATELLITE = "Satellite"
-            const val DETECTOR_BLE = "BLE"
-            const val DETECTOR_WIFI = "WiFi"
-        }
-    }
-
-    /** Callback interface for detectors to report errors and health status */
-    interface DetectorCallback {
-        fun onError(detectorName: String, error: String, recoverable: Boolean = true)
-        fun onScanSuccess(detectorName: String)
-        fun onDetectorStarted(detectorName: String)
-        fun onDetectorStopped(detectorName: String)
-    }
+    // ==================== Injected Dependencies ====================
 
     @Inject
     lateinit var repository: DetectionRepository
@@ -564,16 +233,20 @@ class ScanningService : Service() {
     @Inject
     lateinit var crossDomainAnalyzer: com.flockyou.ai.correlation.CrossDomainAnalyzer
 
-    private var currentBroadcastSettings: com.flockyou.data.BroadcastSettings = com.flockyou.data.BroadcastSettings()
+    // ==================== Settings State ====================
 
-    private var currentPrivacySettings: com.flockyou.data.PrivacySettings = com.flockyou.data.PrivacySettings()
+    internal var currentBroadcastSettings: com.flockyou.data.BroadcastSettings = com.flockyou.data.BroadcastSettings()
 
-    private var currentNotificationSettings: com.flockyou.data.NotificationSettings = com.flockyou.data.NotificationSettings()
+    internal var currentPrivacySettings: com.flockyou.data.PrivacySettings = com.flockyou.data.PrivacySettings()
 
-    private var currentDetectionSettings: com.flockyou.data.DetectionSettings = com.flockyou.data.DetectionSettings()
+    internal var currentNotificationSettings: com.flockyou.data.NotificationSettings = com.flockyou.data.NotificationSettings()
+
+    internal var currentDetectionSettings: com.flockyou.data.DetectionSettings = com.flockyou.data.DetectionSettings()
 
     // Current scan settings for battery-adaptive mode calculations
-    private var currentScanSettings: com.flockyou.data.ScanSettings = com.flockyou.data.ScanSettings()
+    internal var currentScanSettings: com.flockyou.data.ScanSettings = com.flockyou.data.ScanSettings()
+
+    // ==================== Service State ====================
 
     // Screen lock receiver for auto-purge feature (Priority 5)
     private var screenLockReceiver: ScreenLockReceiver? = null
@@ -581,9 +254,9 @@ class ScanningService : Service() {
     // Nuke receiver for graceful shutdown during data wipe
     private var nukeReceiver: BroadcastReceiver? = null
 
-    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    internal val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val gson = Gson()
-    
+
     // Bluetooth
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanner: BluetoothLeScanner? = null
@@ -591,18 +264,18 @@ class ScanningService : Service() {
     private var lastBleHealthUpdateTime: Long = 0L
     private var lastBleScanResultTime: Long = 0L  // Track when we last received any BLE scan result
     private var bleWatchdogFailures: Int = 0  // Count consecutive watchdog failures for BLE
-    
+
     // WiFi
     private lateinit var wifiManager: WifiManager
     private var wifiScanReceiver: BroadcastReceiver? = null
-    
+
     // Location
     private lateinit var fusedLocationClient: FusedLocationProviderClient
-    private var currentLocation: Location? = null
-    
+    internal var currentLocation: Location? = null
+
     // Vibration
-    private lateinit var vibrator: Vibrator
-    
+    internal lateinit var vibrator: Vibrator
+
     // Scan job
     private var scanJob: Job? = null
 
@@ -614,30 +287,30 @@ class ScanningService : Service() {
     private var detectionSettingsJob: Job? = null
 
     // Location update jobs (for proper lifecycle management)
-    private var cellularLocationJob: Job? = null
-    private var rogueWifiLocationJob: Job? = null
-    private var rfLocationJob: Job? = null
-    private var ultrasonicLocationJob: Job? = null
-    private var gnssLocationJob: Job? = null
-    private var suspiciousNetworksJob: Job? = null
+    internal var cellularLocationJob: Job? = null
+    internal var rogueWifiLocationJob: Job? = null
+    internal var rfLocationJob: Job? = null
+    internal var ultrasonicLocationJob: Job? = null
+    internal var gnssLocationJob: Job? = null
+    internal var suspiciousNetworksJob: Job? = null
 
     // Cellular monitor
-    private var cellularMonitor: CellularMonitor? = null
+    internal var cellularMonitor: CellularMonitor? = null
 
     // Satellite monitor
-    private var satelliteMonitor: com.flockyou.monitoring.SatelliteMonitor? = null
+    internal var satelliteMonitor: com.flockyou.monitoring.SatelliteMonitor? = null
 
     // Rogue WiFi monitor
-    private var rogueWifiMonitor: RogueWifiMonitor? = null
+    internal var rogueWifiMonitor: RogueWifiMonitor? = null
 
     // RF signal analyzer
-    private var rfSignalAnalyzer: RfSignalAnalyzer? = null
+    internal var rfSignalAnalyzer: RfSignalAnalyzer? = null
 
     // Ultrasonic detector
-    private var ultrasonicDetector: UltrasonicDetector? = null
+    internal var ultrasonicDetector: UltrasonicDetector? = null
 
     // GNSS satellite monitor
-    private var gnssSatelliteMonitor: com.flockyou.monitoring.GnssSatelliteMonitor? = null
+    internal var gnssSatelliteMonitor: com.flockyou.monitoring.GnssSatelliteMonitor? = null
 
     // Health check job for monitoring detector health
     private var healthCheckJob: Job? = null
@@ -655,16 +328,40 @@ class ScanningService : Service() {
 
     // Battery monitoring for adaptive scanning
     private var batteryReceiver: BroadcastReceiver? = null
-    private var currentBatteryPercent: Int = 100
-    private var isCharging: Boolean = false
+    internal var currentBatteryPercent: Int = 100
+    internal var isCharging: Boolean = false
 
     // Track processed anomaly IDs to prevent duplicates from StateFlow replays
     // These persist across function calls to prevent duplicates when monitors restart
-    private val processedGnssAnomalyIds = mutableSetOf<String>()
-    private val processedCellularAnomalyIds = mutableSetOf<String>()
+    internal val processedGnssAnomalyIds = mutableSetOf<String>()
+    internal val processedCellularAnomalyIds = mutableSetOf<String>()
+
+    // Subsystem collection jobs (accessed from SubsystemManager.kt extension functions)
+    internal var cellularAnomalyJob: Job? = null
+    internal var cellularStatusJob: Job? = null
+    internal var cellularHistoryJob: Job? = null
+    internal var cellularEventsJob: Job? = null
+    internal var satelliteStateJob: Job? = null
+    internal var satelliteAnomalyJob: Job? = null
+    internal var rogueWifiStatusJob: Job? = null
+    internal var rogueWifiAnomalyJob: Job? = null
+    internal var rogueWifiEventsJob: Job? = null
+    internal var rfStatusJob: Job? = null
+    internal var rfAnomalyJob: Job? = null
+    internal var rfEventsJob: Job? = null
+    internal var rfDronesJob: Job? = null
+    internal var ultrasonicStatusJob: Job? = null
+    internal var ultrasonicAnomalyJob: Job? = null
+    internal var ultrasonicEventsJob: Job? = null
+    internal var ultrasonicBeaconsJob: Job? = null
+    internal var gnssStatusJob: Job? = null
+    internal var gnssAnomalyJob: Job? = null
+    internal var gnssEventsJob: Job? = null
+    internal var gnssSatellitesJob: Job? = null
+    internal var gnssMeasurementsJob: Job? = null
 
     // Detector callback implementation for handling errors and health updates
-    private val detectorCallbackImpl = object : DetectorCallback {
+    internal val detectorCallbackImpl = object : DetectorCallback {
         override fun onError(detectorName: String, error: String, recoverable: Boolean) {
             handleDetectorError(detectorName, error, recoverable)
         }
@@ -697,12 +394,12 @@ class ScanningService : Service() {
     private val androidAutoClientCount = AtomicInteger(0)
 
     /** Whether boost mode is active (faster scanning for Android Auto) */
-    private val isBoostModeActive: Boolean
+    internal val isBoostModeActive: Boolean
         get() = androidAutoClientCount.get() > 0
 
     // IPC: Messenger for cross-process communication
     // Using CopyOnWriteArrayList for thread-safe iteration and modification
-    private val ipcClients = java.util.concurrent.CopyOnWriteArrayList<Messenger>()
+    internal val ipcClients = java.util.concurrent.CopyOnWriteArrayList<Messenger>()
 
     // Background HandlerThread for IPC processing to avoid blocking main thread
     // All message handling is wrapped in try-catch to prevent the handler thread from dying
@@ -812,496 +509,26 @@ class ScanningService : Service() {
     }
     private val ipcMessenger = Messenger(ipcHandler)
 
-    /**
-     * Send current state to a specific client (basic state only).
-     */
-    private fun sendStateToClient(client: Messenger) {
-        Log.d(TAG, "sendStateToClient() starting")
-        try {
-            val msg = Message.obtain(null, ScanningServiceIpc.MSG_STATE_UPDATE)
-            msg.data = Bundle().apply {
-                putBoolean(ScanningServiceIpc.KEY_IS_SCANNING, isScanning.value)
-                putInt(ScanningServiceIpc.KEY_DETECTION_COUNT, detectionCount.value)
-                putString(ScanningServiceIpc.KEY_SCAN_STATUS, scanStatus.value.toIpcString())
-                putString(ScanningServiceIpc.KEY_BLE_STATUS, bleStatus.value.toIpcString())
-                putString(ScanningServiceIpc.KEY_WIFI_STATUS, wifiStatus.value.toIpcString())
-                putString(ScanningServiceIpc.KEY_LOCATION_STATUS, locationStatus.value.toIpcString())
-                putString(ScanningServiceIpc.KEY_CELLULAR_STATUS, cellularStatus.value.toIpcString())
-                putString(ScanningServiceIpc.KEY_SATELLITE_STATUS, satelliteStatus.value.toIpcString())
-            }
-            Log.d(TAG, "Sending MSG_STATE_UPDATE: isScanning=${isScanning.value}, scanStatus=${scanStatus.value}")
-            client.send(msg)
-            Log.d(TAG, "MSG_STATE_UPDATE sent")
-
-            // Also send all complex data on state request (initial sync)
-            Log.d(TAG, "Calling sendAllDataToClient...")
-            sendAllDataToClient(client)
-            Log.d(TAG, "sendAllDataToClient completed")
-        } catch (e: RemoteException) {
-            Log.e(TAG, "Failed to send state to client", e)
-            ipcClients.remove(client)
-        }
-    }
-
-    /**
-     * Send all complex data to a specific client.
-     */
-    private fun sendAllDataToClient(client: Messenger) {
-        Log.d(TAG, "sendAllDataToClient() starting")
-        try {
-            // Send seen BLE devices
-            Log.d(TAG, "Sending BLE devices: ${seenBleDevices.value.size} devices")
-            val bleMsg = Message.obtain(null, ScanningServiceIpc.MSG_SEEN_BLE_DEVICES)
-            bleMsg.data = Bundle().apply {
-                putString(ScanningServiceIpc.KEY_JSON_DATA, ScanningServiceIpc.gson.toJson(seenBleDevices.value))
-            }
-            client.send(bleMsg)
-
-            // Send seen WiFi networks
-            val wifiMsg = Message.obtain(null, ScanningServiceIpc.MSG_SEEN_WIFI_NETWORKS)
-            wifiMsg.data = Bundle().apply {
-                putString(ScanningServiceIpc.KEY_JSON_DATA, ScanningServiceIpc.gson.toJson(seenWifiNetworks.value))
-            }
-            client.send(wifiMsg)
-
-            // Send cellular data
-            val cellularMsg = Message.obtain(null, ScanningServiceIpc.MSG_CELLULAR_DATA)
-            cellularMsg.data = Bundle().apply {
-                cellStatus.value?.let { putString(ScanningServiceIpc.KEY_CELL_STATUS_JSON, ScanningServiceIpc.gson.toJson(it)) }
-                putString(ScanningServiceIpc.KEY_SEEN_TOWERS_JSON, ScanningServiceIpc.gson.toJson(seenCellTowers.value))
-                putString(ScanningServiceIpc.KEY_CELLULAR_ANOMALIES_JSON, ScanningServiceIpc.gson.toJson(cellularAnomalies.value))
-                putString(ScanningServiceIpc.KEY_CELLULAR_EVENTS_JSON, ScanningServiceIpc.gson.toJson(cellularEvents.value))
-            }
-            client.send(cellularMsg)
-
-            // Send satellite data
-            val satelliteMsg = Message.obtain(null, ScanningServiceIpc.MSG_SATELLITE_DATA)
-            satelliteMsg.data = Bundle().apply {
-                satelliteState.value?.let { putString(ScanningServiceIpc.KEY_SATELLITE_STATE_JSON, ScanningServiceIpc.gson.toJson(it)) }
-                putString(ScanningServiceIpc.KEY_SATELLITE_ANOMALIES_JSON, ScanningServiceIpc.gson.toJson(satelliteAnomalies.value))
-                putString(ScanningServiceIpc.KEY_SATELLITE_HISTORY_JSON, ScanningServiceIpc.gson.toJson(satelliteHistory.value))
-            }
-            client.send(satelliteMsg)
-
-            // Send rogue WiFi data
-            val rogueWifiMsg = Message.obtain(null, ScanningServiceIpc.MSG_ROGUE_WIFI_DATA)
-            rogueWifiMsg.data = Bundle().apply {
-                rogueWifiStatus.value?.let { putString(ScanningServiceIpc.KEY_ROGUE_WIFI_STATUS_JSON, ScanningServiceIpc.gson.toJson(it)) }
-                putString(ScanningServiceIpc.KEY_ROGUE_WIFI_ANOMALIES_JSON, ScanningServiceIpc.gson.toJson(rogueWifiAnomalies.value))
-                putString(ScanningServiceIpc.KEY_SUSPICIOUS_NETWORKS_JSON, ScanningServiceIpc.gson.toJson(suspiciousNetworks.value))
-            }
-            client.send(rogueWifiMsg)
-
-            // Send RF data
-            val rfMsg = Message.obtain(null, ScanningServiceIpc.MSG_RF_DATA)
-            rfMsg.data = Bundle().apply {
-                rfStatus.value?.let { putString(ScanningServiceIpc.KEY_RF_STATUS_JSON, ScanningServiceIpc.gson.toJson(it)) }
-                putString(ScanningServiceIpc.KEY_RF_ANOMALIES_JSON, ScanningServiceIpc.gson.toJson(rfAnomalies.value))
-                putString(ScanningServiceIpc.KEY_DETECTED_DRONES_JSON, ScanningServiceIpc.gson.toJson(detectedDrones.value))
-            }
-            client.send(rfMsg)
-
-            // Send ultrasonic data
-            val ultrasonicMsg = Message.obtain(null, ScanningServiceIpc.MSG_ULTRASONIC_DATA)
-            ultrasonicMsg.data = Bundle().apply {
-                ultrasonicStatus.value?.let { putString(ScanningServiceIpc.KEY_ULTRASONIC_STATUS_JSON, ScanningServiceIpc.gson.toJson(it)) }
-                putString(ScanningServiceIpc.KEY_ULTRASONIC_ANOMALIES_JSON, ScanningServiceIpc.gson.toJson(ultrasonicAnomalies.value))
-                putString(ScanningServiceIpc.KEY_ULTRASONIC_BEACONS_JSON, ScanningServiceIpc.gson.toJson(ultrasonicBeacons.value))
-            }
-            client.send(ultrasonicMsg)
-
-            // Send GNSS data
-            val gnssMsg = Message.obtain(null, ScanningServiceIpc.MSG_GNSS_DATA)
-            gnssMsg.data = Bundle().apply {
-                gnssStatus.value?.let { putString(ScanningServiceIpc.KEY_GNSS_STATUS_JSON, ScanningServiceIpc.gson.toJson(it)) }
-                putString(ScanningServiceIpc.KEY_GNSS_SATELLITES_JSON, ScanningServiceIpc.gson.toJson(gnssSatellites.value))
-                putString(ScanningServiceIpc.KEY_GNSS_ANOMALIES_JSON, ScanningServiceIpc.gson.toJson(gnssAnomalies.value))
-                putString(ScanningServiceIpc.KEY_GNSS_EVENTS_JSON, ScanningServiceIpc.gson.toJson(gnssEvents.value))
-                gnssMeasurements.value?.let { putString(ScanningServiceIpc.KEY_GNSS_MEASUREMENTS_JSON, ScanningServiceIpc.gson.toJson(it)) }
-            }
-            client.send(gnssMsg)
-
-            // Send last detection
-            val detectionMsg = Message.obtain(null, ScanningServiceIpc.MSG_LAST_DETECTION)
-            detectionMsg.data = Bundle().apply {
-                putString(ScanningServiceIpc.KEY_LAST_DETECTION_JSON, lastDetection.value?.let { ScanningServiceIpc.gson.toJson(it) })
-            }
-            client.send(detectionMsg)
-
-            // Send detector health
-            val healthJson = ScanningServiceIpc.gson.toJson(detectorHealth.value)
-            Log.d(TAG, "Sending detector health to client: ${detectorHealth.value.size} detectors, running=${detectorHealth.value.values.count { it.isRunning }}")
-            val healthMsg = Message.obtain(null, ScanningServiceIpc.MSG_DETECTOR_HEALTH)
-            healthMsg.data = Bundle().apply {
-                putString(ScanningServiceIpc.KEY_DETECTOR_HEALTH_JSON, healthJson)
-            }
-            client.send(healthMsg)
-
-            // Send error log
-            val errorMsg = Message.obtain(null, ScanningServiceIpc.MSG_ERROR_LOG)
-            errorMsg.data = Bundle().apply {
-                putString(ScanningServiceIpc.KEY_ERROR_LOG_JSON, ScanningServiceIpc.gson.toJson(errorLog.value))
-            }
-            client.send(errorMsg)
-
-            // Send scan statistics
-            val statsMsg = Message.obtain(null, ScanningServiceIpc.MSG_SCAN_STATS)
-            statsMsg.data = Bundle().apply {
-                putString(ScanningServiceIpc.KEY_SCAN_STATS_JSON, ScanningServiceIpc.gson.toJson(scanStats.value))
-            }
-            client.send(statsMsg)
-
-            // Send threading data
-            sendThreadingDataToClient(client)
-        } catch (e: RemoteException) {
-            Log.e(TAG, "Failed to send all data to client", e)
-        }
-    }
-
-    /**
-     * Send threading monitor data to a specific client.
-     */
-    private fun sendThreadingDataToClient(client: Messenger) {
-        try {
-            val systemState = threadingMonitor.systemState.value
-            val scannerStates = threadingMonitor.scannerStates.value
-            val alerts = threadingMonitor.threadingAlerts.value
-
-            val msg = Message.obtain(null, ScanningServiceIpc.MSG_THREADING_DATA)
-            msg.data = Bundle().apply {
-                putString(ScanningServiceIpc.KEY_THREADING_SYSTEM_STATE_JSON, ScanningServiceIpc.gson.toJson(systemState))
-                putString(ScanningServiceIpc.KEY_THREADING_SCANNER_STATES_JSON, ScanningServiceIpc.gson.toJson(scannerStates))
-                putString(ScanningServiceIpc.KEY_THREADING_ALERTS_JSON, ScanningServiceIpc.gson.toJson(alerts))
-            }
-            client.send(msg)
-        } catch (e: RemoteException) {
-            Log.e(TAG, "Failed to send threading data to client", e)
-        }
-    }
-
-    /**
-     * Broadcast threading monitor data to all registered IPC clients.
-     */
-    private fun broadcastThreadingData() {
-        if (ipcClients.isEmpty()) return
-        val systemStateJson = ScanningServiceIpc.gson.toJson(threadingMonitor.systemState.value)
-        val scannerStatesJson = ScanningServiceIpc.gson.toJson(threadingMonitor.scannerStates.value)
-        val alertsJson = ScanningServiceIpc.gson.toJson(threadingMonitor.threadingAlerts.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_THREADING_DATA).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_THREADING_SYSTEM_STATE_JSON, systemStateJson)
-                    putString(ScanningServiceIpc.KEY_THREADING_SCANNER_STATES_JSON, scannerStatesJson)
-                    putString(ScanningServiceIpc.KEY_THREADING_ALERTS_JSON, alertsJson)
-                }
-            }
-        }
-    }
-
-    /**
-     * Helper to broadcast a message to all IPC clients.
-     * CopyOnWriteArrayList allows safe iteration while removing dead clients.
-     */
-    private inline fun broadcastToClients(createMessage: () -> Message) {
-        if (ipcClients.isEmpty()) return
-        val msg = createMessage()
-        for (client in ipcClients) {
-            try {
-                // Create a copy of the message for each client
-                val clientMsg = Message.obtain(msg)
-                client.send(clientMsg)
-            } catch (e: RemoteException) {
-                // Remove dead client - safe with CopyOnWriteArrayList
-                ipcClients.remove(client)
-            }
-        }
-        msg.recycle()
-    }
-
-    /**
-     * Broadcast state update to all registered IPC clients.
-     */
-    private fun broadcastStateToClients() {
-        for (client in ipcClients) {
-            try {
-                sendStateToClient(client)
-            } catch (e: RemoteException) {
-                ipcClients.remove(client)
-            }
-        }
-    }
-
-    /**
-     * Broadcast scanning started to all registered IPC clients.
-     */
-    private fun broadcastScanningStarted() {
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_SCANNING_STARTED)
-        }
-    }
-
-    /**
-     * Broadcast scanning stopped to all registered IPC clients.
-     */
-    private fun broadcastScanningStopped() {
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_SCANNING_STOPPED)
-        }
-    }
-
-    /**
-     * Broadcast seen BLE devices to all registered IPC clients.
-     */
-    private fun broadcastSeenBleDevices() {
-        if (ipcClients.isEmpty()) return
-        val json = ScanningServiceIpc.gson.toJson(seenBleDevices.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_SEEN_BLE_DEVICES).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_JSON_DATA, json)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast seen WiFi networks to all registered IPC clients.
-     */
-    private fun broadcastSeenWifiNetworks() {
-        if (ipcClients.isEmpty()) return
-        val json = ScanningServiceIpc.gson.toJson(seenWifiNetworks.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_SEEN_WIFI_NETWORKS).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_JSON_DATA, json)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast cellular monitoring data to all registered IPC clients.
-     */
-    private fun broadcastCellularData() {
-        if (ipcClients.isEmpty()) return
-        val cellStatusJson = cellStatus.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        val towersJson = ScanningServiceIpc.gson.toJson(seenCellTowers.value)
-        val anomaliesJson = ScanningServiceIpc.gson.toJson(cellularAnomalies.value)
-        val eventsJson = ScanningServiceIpc.gson.toJson(cellularEvents.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_CELLULAR_DATA).apply {
-                data = Bundle().apply {
-                    cellStatusJson?.let { putString(ScanningServiceIpc.KEY_CELL_STATUS_JSON, it) }
-                    putString(ScanningServiceIpc.KEY_SEEN_TOWERS_JSON, towersJson)
-                    putString(ScanningServiceIpc.KEY_CELLULAR_ANOMALIES_JSON, anomaliesJson)
-                    putString(ScanningServiceIpc.KEY_CELLULAR_EVENTS_JSON, eventsJson)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast satellite monitoring data to all registered IPC clients.
-     */
-    private fun broadcastSatelliteData() {
-        if (ipcClients.isEmpty()) return
-        val stateJson = satelliteState.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        val anomaliesJson = ScanningServiceIpc.gson.toJson(satelliteAnomalies.value)
-        val historyJson = ScanningServiceIpc.gson.toJson(satelliteHistory.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_SATELLITE_DATA).apply {
-                data = Bundle().apply {
-                    stateJson?.let { putString(ScanningServiceIpc.KEY_SATELLITE_STATE_JSON, it) }
-                    putString(ScanningServiceIpc.KEY_SATELLITE_ANOMALIES_JSON, anomaliesJson)
-                    putString(ScanningServiceIpc.KEY_SATELLITE_HISTORY_JSON, historyJson)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast rogue WiFi monitoring data to all registered IPC clients.
-     */
-    private fun broadcastRogueWifiData() {
-        if (ipcClients.isEmpty()) return
-        val statusJson = rogueWifiStatus.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        val anomaliesJson = ScanningServiceIpc.gson.toJson(rogueWifiAnomalies.value)
-        val suspiciousJson = ScanningServiceIpc.gson.toJson(suspiciousNetworks.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_ROGUE_WIFI_DATA).apply {
-                data = Bundle().apply {
-                    statusJson?.let { putString(ScanningServiceIpc.KEY_ROGUE_WIFI_STATUS_JSON, it) }
-                    putString(ScanningServiceIpc.KEY_ROGUE_WIFI_ANOMALIES_JSON, anomaliesJson)
-                    putString(ScanningServiceIpc.KEY_SUSPICIOUS_NETWORKS_JSON, suspiciousJson)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast RF signal analysis data to all registered IPC clients.
-     */
-    private fun broadcastRfData() {
-        if (ipcClients.isEmpty()) return
-        val statusJson = rfStatus.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        val anomaliesJson = ScanningServiceIpc.gson.toJson(rfAnomalies.value)
-        val dronesJson = ScanningServiceIpc.gson.toJson(detectedDrones.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_RF_DATA).apply {
-                data = Bundle().apply {
-                    statusJson?.let { putString(ScanningServiceIpc.KEY_RF_STATUS_JSON, it) }
-                    putString(ScanningServiceIpc.KEY_RF_ANOMALIES_JSON, anomaliesJson)
-                    putString(ScanningServiceIpc.KEY_DETECTED_DRONES_JSON, dronesJson)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast ultrasonic detection data to all registered IPC clients.
-     */
-    private fun broadcastUltrasonicData() {
-        if (ipcClients.isEmpty()) return
-        val statusJson = ultrasonicStatus.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        val anomaliesJson = ScanningServiceIpc.gson.toJson(ultrasonicAnomalies.value)
-        val beaconsJson = ScanningServiceIpc.gson.toJson(ultrasonicBeacons.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_ULTRASONIC_DATA).apply {
-                data = Bundle().apply {
-                    statusJson?.let { putString(ScanningServiceIpc.KEY_ULTRASONIC_STATUS_JSON, it) }
-                    putString(ScanningServiceIpc.KEY_ULTRASONIC_ANOMALIES_JSON, anomaliesJson)
-                    putString(ScanningServiceIpc.KEY_ULTRASONIC_BEACONS_JSON, beaconsJson)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast GNSS satellite monitoring data to all registered IPC clients.
-     */
-    private fun broadcastGnssData() {
-        if (ipcClients.isEmpty()) return
-        val statusJson = gnssStatus.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        val satellitesJson = ScanningServiceIpc.gson.toJson(gnssSatellites.value)
-        val anomaliesJson = ScanningServiceIpc.gson.toJson(gnssAnomalies.value)
-        val eventsJson = ScanningServiceIpc.gson.toJson(gnssEvents.value)
-        val measurementsJson = gnssMeasurements.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_GNSS_DATA).apply {
-                data = Bundle().apply {
-                    statusJson?.let { putString(ScanningServiceIpc.KEY_GNSS_STATUS_JSON, it) }
-                    putString(ScanningServiceIpc.KEY_GNSS_SATELLITES_JSON, satellitesJson)
-                    putString(ScanningServiceIpc.KEY_GNSS_ANOMALIES_JSON, anomaliesJson)
-                    putString(ScanningServiceIpc.KEY_GNSS_EVENTS_JSON, eventsJson)
-                    measurementsJson?.let { putString(ScanningServiceIpc.KEY_GNSS_MEASUREMENTS_JSON, it) }
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast last detection to all registered IPC clients.
-     */
-    private fun broadcastLastDetection() {
-        if (ipcClients.isEmpty()) return
-        val json = lastDetection.value?.let { ScanningServiceIpc.gson.toJson(it) }
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_LAST_DETECTION).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_LAST_DETECTION_JSON, json)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast detection refresh event to all IPC clients.
-     * Notifies UI to reload detections from database.
-     * Also broadcasts active detections list for cross-process clients like Android Auto.
-     */
-    private fun broadcastDetectionRefresh() {
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_DETECTION_REFRESH)
-        }
-        // Also broadcast active detections for cross-process clients (e.g., Android Auto)
-        // that cannot access the database directly
-        broadcastActiveDetections()
-    }
-
-    /**
-     * Broadcast boost mode status to all IPC clients.
-     * Used by Android Auto to know when boost mode is active.
-     */
-    private fun broadcastBoostStatus() {
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_BOOST_STATUS).apply {
-                data = Bundle().apply {
-                    putBoolean(ScanningServiceIpc.KEY_BOOST_MODE_ACTIVE, isBoostModeActive)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast active detections list to all IPC clients.
-     * Used by cross-process clients like Android Auto that cannot access the database directly.
-     */
-    private fun broadcastActiveDetections() {
-        if (ipcClients.isEmpty()) return
-        serviceScope.launch {
-            try {
-                val activeDetections = repository.activeDetections.first()
-                val json = ScanningServiceIpc.gson.toJson(activeDetections)
-                broadcastToClients {
-                    Message.obtain(null, ScanningServiceIpc.MSG_ACTIVE_DETECTIONS).apply {
-                        data = Bundle().apply {
-                            putString(ScanningServiceIpc.KEY_ACTIVE_DETECTIONS_JSON, json)
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error broadcasting active detections", e)
-            }
-        }
-    }
-
-    /**
-     * Broadcast all data to IPC clients. Called periodically to keep clients in sync.
-     */
-    private fun broadcastAllDataToClients() {
-        if (ipcClients.isEmpty()) return
-        broadcastStateToClients()
-        broadcastSeenBleDevices()
-        broadcastSeenWifiNetworks()
-        broadcastCellularData()
-        broadcastSatelliteData()
-        broadcastRogueWifiData()
-        broadcastRfData()
-        broadcastUltrasonicData()
-        broadcastGnssData()
-        broadcastLastDetection()
-        broadcastActiveDetections()
-        broadcastDetectorHealth()
-    }
+    // ==================== Service Lifecycle ====================
 
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
-        
+
         // Initialize Power Manager and Wake Lock
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        
+
         // Initialize Bluetooth
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
         bleScanner = bluetoothAdapter?.bluetoothLeScanner
-        
+
         // Initialize WiFi
         wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        
+
         // Initialize Location
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        
+
         // Initialize Vibrator
         vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -1310,7 +537,7 @@ class ScanningService : Service() {
             @Suppress("DEPRECATION")
             getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-        
+
         // Initialize Cellular Monitor
         cellularMonitor = CellularMonitor(applicationContext, detectorCallbackImpl).also {
             // Set ephemeral mode from current privacy settings (will be updated by settings collector)
@@ -1338,87 +565,52 @@ class ScanningService : Service() {
 
         createNotificationChannel()
     }
-    
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "Service started with action: ${intent?.action}")
-        
+
         // Acquire wake lock to prevent CPU from sleeping
         acquireWakeLock()
-        
+
         val notification = createNotification("Initializing...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        
+
         // Mark service as enabled for boot receiver
         BootReceiver.setServiceEnabled(this, true)
-        
+
         // Schedule watchdog to ensure service stays running
         ServiceRestartReceiver.scheduleWatchdog(this)
-        
+
         startScanning()
-        
+
         return START_STICKY
     }
-    
-    /**
-     * Acquire a partial wake lock to keep CPU running during scans.
-     * Uses a 10-minute timeout which is re-acquired in the scan loop.
-     */
-    private fun acquireWakeLock() {
-        if (wakeLock == null) {
-            wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                WAKE_LOCK_TAG
-            ).apply {
-                setReferenceCounted(false)
-            }
-        }
-        
-        if (wakeLock?.isHeld == false) {
-            // Acquire with timeout of 10 minutes, will be re-acquired in scan loop
-            wakeLock?.acquire(10 * 60 * 1000L)
-            Log.d(TAG, "Wake lock acquired")
-        }
-    }
-    
-    /**
-     * Release the wake lock
-     */
-    private fun releaseWakeLock() {
-        try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-                Log.d(TAG, "Wake lock released")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error releasing wake lock", e)
-        }
-    }
-    
+
     override fun onBind(intent: Intent?): IBinder? {
         Log.d(TAG, "Client binding to service")
         return ipcMessenger.binder
     }
-    
+
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
         Log.d(TAG, "Task removed - scheduling restart")
-        
+
         // If service should continue running, schedule restart
         if (BootReceiver.isServiceEnabled(this)) {
             ServiceRestartReceiver.scheduleRestart(this)
         }
     }
-    
+
     override fun onDestroy() {
         Log.d(TAG, "Service destroyed")
-        
+
         // Release wake lock
         releaseWakeLock()
-        
+
         stopScanning()
         cellularMonitor?.destroy()
         cellularMonitor = null
@@ -1442,7 +634,7 @@ class ScanningService : Service() {
             Log.d(TAG, "Service intentionally stopped - canceling watchdog")
             ServiceRestartReceiver.cancelWatchdog(this)
         }
-        
+
         serviceScope.cancel()
 
         // Clean up IPC handler thread
@@ -1450,7 +642,7 @@ class ScanningService : Service() {
 
         super.onDestroy()
     }
-    
+
     /**
      * Called when user explicitly stops the service
      */
@@ -1461,7 +653,46 @@ class ScanningService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
-    
+
+    // ==================== Wake Lock ====================
+
+    /**
+     * Acquire a partial wake lock to keep CPU running during scans.
+     * Uses a 10-minute timeout which is re-acquired in the scan loop.
+     */
+    private fun acquireWakeLock() {
+        if (wakeLock == null) {
+            wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                WAKE_LOCK_TAG
+            ).apply {
+                setReferenceCounted(false)
+            }
+        }
+
+        if (wakeLock?.isHeld == false) {
+            // Acquire with timeout of 10 minutes, will be re-acquired in scan loop
+            wakeLock?.acquire(10 * 60 * 1000L)
+            Log.d(TAG, "Wake lock acquired")
+        }
+    }
+
+    /**
+     * Release the wake lock
+     */
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+                Log.d(TAG, "Wake lock released")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing wake lock", e)
+        }
+    }
+
+    // ==================== Notification ====================
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -1472,12 +703,12 @@ class ScanningService : Service() {
                 description = "Surveillance device detection service"
                 setShowBadge(false)
             }
-            
+
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
         }
     }
-    
+
     private fun createNotification(contentText: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -1485,7 +716,7 @@ class ScanningService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
-        
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_scanning_title))
             .setContentText(contentText)
@@ -1495,13 +726,15 @@ class ScanningService : Service() {
             .setSilent(true)
             .build()
     }
-    
+
     private fun updateNotification(contentText: String) {
         val notification = createNotification(contentText)
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
-    
+
+    // ==================== Core Scan Loop ====================
+
     @SuppressLint("MissingPermission")
     private fun startScanning() {
         if (isScanning.value) return
@@ -1636,13 +869,13 @@ class ScanningService : Service() {
             bleStatus.value = SubsystemStatus.PermissionDenied("BLUETOOTH_SCAN")
             logError("BLE", -1, "Bluetooth permissions not granted", recoverable = true)
         }
-        
+
         if (!hasLocationPermissions()) {
             locationStatus.value = SubsystemStatus.PermissionDenied("ACCESS_FINE_LOCATION")
             wifiStatus.value = SubsystemStatus.PermissionDenied("ACCESS_FINE_LOCATION")
             logError("Location", -1, "Location permissions not granted", recoverable = true)
         }
-        
+
         isScanning.value = true
         scanStatus.value = ScanStatus.Active
 
@@ -1652,17 +885,17 @@ class ScanningService : Service() {
 
         // Get initial location
         updateLocation()
-        
+
         // Register WiFi scan receiver
         if (config.enableWifi) {
             registerWifiReceiver()
         }
-        
+
         // Start cellular monitoring
         if (config.enableCellular) {
             startCellularMonitoring()
         }
-        
+
         // Start satellite monitoring
         startSatelliteMonitoring()
 
@@ -1755,9 +988,6 @@ class ScanningService : Service() {
                     ServiceRestartReceiver.recordHeartbeat(this@ScanningService)
 
                     // === BLE BURST SCAN ===
-                    // Scan for 25 seconds in low-latency mode, then 5s cooldown
-                    // This prevents Android thermal throttling while maximizing detection
-                    // (Boost mode reduces these timings for faster Android Auto detection)
                     if (scanConfig.enableBle) {
                         try {
                             startBleScan(scanConfig.aggressiveBleMode)
@@ -1765,7 +995,7 @@ class ScanningService : Service() {
                             stopBleScan()
                             consecutiveBleErrors = 0 // Reset on success
 
-                            // Thermal cooldown period - prevents Android from force-stopping scans
+                            // Thermal cooldown period
                             Log.d(TAG, "BLE cooldown: ${effectiveBleCooldown}ms")
                             delay(effectiveBleCooldown)
                         } catch (e: Exception) {
@@ -1773,7 +1003,6 @@ class ScanningService : Service() {
                             Log.e(TAG, "BLE scan error (consecutive: $consecutiveBleErrors)", e)
                             logError("BLE", -1, "Scan error: ${e.message}", recoverable = true)
 
-                            // If too many consecutive errors, disable BLE temporarily
                             if (consecutiveBleErrors >= 3) {
                                 Log.w(TAG, "Too many BLE errors, pausing BLE for this cycle")
                                 bleStatus.value = SubsystemStatus.Error(-1, "Paused due to errors")
@@ -1783,7 +1012,6 @@ class ScanningService : Service() {
                     }
 
                     // === WiFi SCAN ===
-                    // Trigger WiFi scan (results come via broadcast receiver)
                     if (scanConfig.enableWifi) {
                         try {
                             startWifiScan()
@@ -1845,111 +1073,6 @@ class ScanningService : Service() {
                     logError("Scanner", -1, "Scan cycle error: ${e.message}", recoverable = true)
                     // Don't let any error kill the loop - just continue to next cycle
                     delay(1000) // Brief pause before retrying
-                }
-            }
-        }
-    }
-    
-    private fun cleanupSeenDevices(timeout: Long) {
-        val cutoff = System.currentTimeMillis() - timeout
-        val bleCountBefore = seenBleDevices.value.size
-        val wifiCountBefore = seenWifiNetworks.value.size
-        synchronized(seenDevicesLock) {
-            seenBleDevices.value = seenBleDevices.value.filter { it.lastSeen > cutoff }
-            seenWifiNetworks.value = seenWifiNetworks.value.filter { it.lastSeen > cutoff }
-        }
-        // Broadcast if devices were removed
-        if (seenBleDevices.value.size != bleCountBefore) {
-            broadcastSeenBleDevices()
-        }
-        if (seenWifiNetworks.value.size != wifiCountBefore) {
-            broadcastSeenWifiNetworks()
-        }
-    }
-    
-    private fun buildStatusText(): String {
-        val parts = mutableListOf<String>()
-        parts.add("Detections: ${detectionCount.value}")
-        
-        when (val ble = bleStatus.value) {
-            is SubsystemStatus.Error -> parts.add("BLE: Error ${ble.code}")
-            is SubsystemStatus.PermissionDenied -> parts.add("BLE: No permission")
-            is SubsystemStatus.Disabled -> parts.add("BLE: Disabled")
-            else -> {}
-        }
-        
-        when (wifiStatus.value) {
-            is SubsystemStatus.Error -> parts.add("WiFi: Error")
-            is SubsystemStatus.PermissionDenied -> parts.add("WiFi: No permission")
-            is SubsystemStatus.Disabled -> parts.add("WiFi: Disabled")
-            else -> {}
-        }
-        
-        return parts.joinToString(" | ")
-    }
-    
-    private fun logError(subsystem: String, code: Int, message: String, recoverable: Boolean = true) {
-        val error = ScanError(
-            subsystem = subsystem,
-            code = code,
-            message = message,
-            recoverable = recoverable
-        )
-        Log.e(TAG, "[$subsystem] Error $code: $message")
-
-        val currentErrors = errorLog.value.toMutableList()
-        currentErrors.add(0, error)
-        if (currentErrors.size > MAX_ERROR_LOG_SIZE) {
-            currentErrors.removeAt(currentErrors.lastIndex)
-        }
-        errorLog.value = currentErrors
-        broadcastErrorLog()
-    }
-
-    /**
-     * Broadcast error log to all registered IPC clients.
-     */
-    private fun broadcastErrorLog() {
-        if (ipcClients.isEmpty()) return
-        val json = ScanningServiceIpc.gson.toJson(errorLog.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_ERROR_LOG).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_ERROR_LOG_JSON, json)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast scan statistics to all registered IPC clients.
-     */
-    private fun broadcastScanStats() {
-        if (ipcClients.isEmpty()) return
-        val json = ScanningServiceIpc.gson.toJson(scanStats.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_SCAN_STATS).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_SCAN_STATS_JSON, json)
-                }
-            }
-        }
-    }
-
-    /**
-     * Broadcast subsystem status updates to all registered IPC clients.
-     * This should be called whenever any subsystem status changes.
-     */
-    private fun broadcastSubsystemStatus() {
-        if (ipcClients.isEmpty()) return
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_SUBSYSTEM_STATUS).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_BLE_STATUS, bleStatus.value.toIpcString())
-                    putString(ScanningServiceIpc.KEY_WIFI_STATUS, wifiStatus.value.toIpcString())
-                    putString(ScanningServiceIpc.KEY_LOCATION_STATUS, locationStatus.value.toIpcString())
-                    putString(ScanningServiceIpc.KEY_CELLULAR_STATUS, cellularStatus.value.toIpcString())
-                    putString(ScanningServiceIpc.KEY_SATELLITE_STATUS, satelliteStatus.value.toIpcString())
                 }
             }
         }
@@ -2024,807 +1147,158 @@ class ScanningService : Service() {
 
         Log.d(TAG, "Stopped scanning")
     }
-    
-    // ==================== Cellular Monitoring ====================
-    
-    private var cellularAnomalyJob: Job? = null
-    private var cellularStatusJob: Job? = null
-    private var cellularHistoryJob: Job? = null
-    private var cellularEventsJob: Job? = null
-    
-    private fun startCellularMonitoring() {
-        if (!hasTelephonyPermissions()) {
-            cellularStatus.value = SubsystemStatus.PermissionDenied("READ_PHONE_STATE")
-            Log.w(TAG, "Missing telephony permissions for cellular monitoring")
-            return
+
+    // ==================== Seen Device Management ====================
+
+    private fun cleanupSeenDevices(timeout: Long) {
+        val cutoff = System.currentTimeMillis() - timeout
+        val bleCountBefore = seenBleDevices.value.size
+        val wifiCountBefore = seenWifiNetworks.value.size
+        synchronized(ScanningServiceState) {
+            seenBleDevices.value = seenBleDevices.value.filter { it.lastSeen > cutoff }
+            seenWifiNetworks.value = seenWifiNetworks.value.filter { it.lastSeen > cutoff }
         }
-        
-        cellularMonitor?.startMonitoring()
-        cellularStatus.value = SubsystemStatus.Active
-        broadcastSubsystemStatus()
-        Log.d(TAG, "Cellular monitoring started")
-        
-        // Collect cellular status updates
-        cellularStatusJob = serviceScope.launch {
-            cellularMonitor?.cellStatus?.collect { status ->
-                Companion.cellStatus.value = status
-                broadcastCellularData()
-            }
+        // Broadcast if devices were removed
+        if (seenBleDevices.value.size != bleCountBefore) {
+            broadcastSeenBleDevices()
         }
-
-        // Collect seen cell tower history
-        cellularHistoryJob = serviceScope.launch {
-            cellularMonitor?.seenCellTowers?.collect { towers ->
-                seenCellTowers.value = towers
-                broadcastCellularData()
-            }
-        }
-
-        // Collect cellular timeline events
-        cellularEventsJob = serviceScope.launch {
-            cellularMonitor?.cellularEvents?.collect { events ->
-                cellularEvents.value = events
-                broadcastCellularData()
-            }
-        }
-        
-        // Collect cellular anomalies and convert to detections
-        // ==================== Handler-Based Cellular Detection ====================
-        // Delegate anomaly-to-detection conversion to CellularDetectionHandler for:
-        // - Settings-based filtering (enabled patterns, thresholds)
-        // - IMSI catcher score calculation
-        // - AI prompt generation for cellular anomalies
-        // Note: processedCellularAnomalyIds is now a class-level property to persist across restarts
-
-        cellularAnomalyJob = serviceScope.launch {
-            cellularMonitor?.anomalies?.collect { anomalies ->
-                cellularAnomalies.value = anomalies
-                broadcastCellularData()
-
-                for (anomaly in anomalies) {
-                    // Skip if already processed in this session
-                    if (anomaly.id in processedCellularAnomalyIds) {
-                        continue
-                    }
-
-                    // Send broadcast for automation apps
-                    sendCellularAnomalyBroadcast(anomaly)
-
-                    // Convert anomaly to detection using the handler
-                    // The handler implements settings-based filtering and IMSI score calculation
-                    val detection = processCellularWithHandler(anomaly)
-                    detection?.let { det ->
-                        // Check if we already have this detection (use anomaly ID)
-                        val detWithId = det.copy(macAddress = anomaly.id)
-                        val existing = repository.getDetectionByMacAddress(anomaly.id)
-                        if (existing == null) {
-                            try {
-                                // Store enriched heuristics data for LLM analysis
-                                anomaly.analysis?.let { analysis ->
-                                    enrichedDataCache.putCellular(detWithId.id, analysis)
-                                    Log.d(TAG, "Stored cellular heuristics for detection ${detWithId.id} (IMSI score: ${analysis.imsiCatcherScore})")
-                                }
-
-                                insertDetectionWithAnalysis(detWithId)
-                                processedCellularAnomalyIds.add(anomaly.id)
-
-                                // Alert and vibrate for high-severity anomalies
-                                if (det.threatLevel == ThreatLevel.CRITICAL ||
-                                    det.threatLevel == ThreatLevel.HIGH) {
-                                    alertUser(det)
-                                }
-
-                                lastDetection.value = det
-                                detectionCount.value = repository.getTotalDetectionCount()
-                                broadcastLastDetection()
-                                broadcastStateToClients()
-                                broadcastDetectionRefresh()
-
-                                if (BuildConfig.DEBUG) {
-                                    Log.w(TAG, "CELLULAR ANOMALY: ${anomaly.type.displayName} - ${anomaly.description}")
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error saving cellular detection: ${e.message}", e)
-                            }
-                        } else {
-                            // Already in database, mark as processed
-                            processedCellularAnomalyIds.add(anomaly.id)
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Also update cellular location when we get GPS updates
-        cellularLocationJob = serviceScope.launch {
-            while (isScanning.value) {
-                currentLocation?.let { loc ->
-                    cellularMonitor?.updateLocation(loc.latitude, loc.longitude)
-                }
-                delay(5000)
-            }
+        if (seenWifiNetworks.value.size != wifiCountBefore) {
+            broadcastSeenWifiNetworks()
         }
     }
 
-    private fun stopCellularMonitoring() {
-        cellularLocationJob?.cancel()
-        cellularLocationJob = null
-        cellularAnomalyJob?.cancel()
-        cellularAnomalyJob = null
-        cellularStatusJob?.cancel()
-        cellularStatusJob = null
-        cellularHistoryJob?.cancel()
-        cellularHistoryJob = null
-        cellularEventsJob?.cancel()
-        cellularEventsJob = null
-        cellularMonitor?.stopMonitoring()
-        Log.d(TAG, "Cellular monitoring stopped")
-    }
-    
-    // ==================== Satellite Monitoring ====================
-    
-    private var satelliteStateJob: Job? = null
-    private var satelliteAnomalyJob: Job? = null
-    
-    @SuppressLint("MissingPermission")
-    private fun startSatelliteMonitoring() {
-        if (!hasTelephonyPermissions()) {
-            satelliteStatus.value = SubsystemStatus.PermissionDenied("READ_PHONE_STATE")
-            Log.w(TAG, "Missing telephony permissions for satellite monitoring")
-            return
-        }
+    private fun trackSeenBleDevice(
+        macAddress: String,
+        deviceName: String?,
+        rssi: Int,
+        serviceUuids: List<java.util.UUID>,
+        manufacturerData: Map<Int, String> = emptyMap(),
+        advertisingRate: Float = 0f
+    ) {
+        // Synchronize to prevent race conditions when multiple scan results arrive concurrently
+        synchronized(ScanningServiceState) {
+            val currentList = seenBleDevices.value.toMutableList()
+            val existingIndex = currentList.indexOfFirst { it.id == macAddress }
 
-        Log.d(TAG, "Starting satellite monitoring")
-        satelliteStatus.value = SubsystemStatus.Active
-        broadcastSubsystemStatus()
+            if (existingIndex >= 0) {
+                // Update existing
+                val existing = currentList[existingIndex]
+                currentList[existingIndex] = existing.copy(
+                    name = deviceName ?: existing.name,
+                    rssi = rssi,
+                    lastSeen = System.currentTimeMillis(),
+                    seenCount = existing.seenCount + 1,
+                    manufacturerData = if (manufacturerData.isNotEmpty()) manufacturerData else existing.manufacturerData,
+                    advertisingRate = advertisingRate
+                )
+            } else {
+                // Add new
+                val manufacturer = try {
+                    // Try to identify manufacturer from MAC OUI
+                    val oui = macAddress.take(8).uppercase()
+                    DetectionPatterns.getManufacturerFromOui(oui)
+                } catch (e: Exception) { null }
 
-        satelliteMonitor?.startMonitoring()
-        
-        // Collect satellite state updates
-        satelliteStateJob = serviceScope.launch {
-            var wasSatelliteConnected = false
-            satelliteMonitor?.satelliteState?.collect { state ->
-                satelliteState.value = state
-                broadcastSatelliteData()
-                Log.d(TAG, "Satellite state updated: connected=${state.isConnected}, type=${state.connectionType}")
+                currentList.add(0, SeenDevice(
+                    id = macAddress,
+                    name = deviceName,
+                    type = "BLE",
+                    rssi = rssi,
+                    manufacturer = manufacturer,
+                    serviceUuids = serviceUuids.map { it.toString() },
+                    manufacturerData = manufacturerData,
+                    advertisingRate = advertisingRate
+                ))
 
-                // Send/cancel satellite connection notification on state transitions
-                if (state.isConnected && !wasSatelliteConnected) {
-                    sendSatelliteConnectionNotification(state)
-                } else if (!state.isConnected && wasSatelliteConnected) {
-                    cancelSatelliteConnectionNotification()
+                // Limit list size
+                if (currentList.size > 100) {
+                    currentList.removeAt(currentList.lastIndex)
                 }
-                wasSatelliteConnected = state.isConnected
+            }
+
+            seenBleDevices.value = currentList
+            broadcastSeenBleDevices()
+        }
+    }
+
+    private fun trackSeenWifiNetwork(bssid: String, ssid: String, rssi: Int) {
+        val currentList = seenWifiNetworks.value.toMutableList()
+        val existingIndex = currentList.indexOfFirst { it.id == bssid }
+
+        if (existingIndex >= 0) {
+            val existing = currentList[existingIndex]
+            currentList[existingIndex] = existing.copy(
+                name = ssid,
+                rssi = rssi,
+                lastSeen = System.currentTimeMillis(),
+                seenCount = existing.seenCount + 1
+            )
+        } else {
+            val manufacturer = try {
+                val oui = bssid.take(8).uppercase()
+                DetectionPatterns.getManufacturerFromOui(oui)
+            } catch (e: Exception) { null }
+
+            currentList.add(0, SeenDevice(
+                id = bssid,
+                name = ssid,
+                type = "WiFi",
+                rssi = rssi,
+                manufacturer = manufacturer
+            ))
+
+            if (currentList.size > 100) {
+                currentList.removeAt(currentList.lastIndex)
             }
         }
 
-        // Collect satellite anomalies
-        // ==================== Handler-Based Satellite Detection ====================
-        // Delegate anomaly-to-detection conversion to SatelliteDetectionHandler for:
-        // - Settings-based filtering (enabled patterns, thresholds)
-        // - NTN parameter analysis and timing validation
-        // - Device type classification (SATELLITE_NTN vs STINGRAY_IMSI)
-        // - AI prompt generation for satellite anomalies
-        satelliteAnomalyJob = serviceScope.launch {
-            satelliteMonitor?.anomalies?.collect { anomaly ->
-                Log.d(TAG, "Satellite anomaly detected: ${anomaly.type} - ${anomaly.severity}")
-
-                // Send broadcast for automation apps
-                sendSatelliteAnomalyBroadcast(anomaly)
-
-                // Add to anomaly list
-                val currentAnomalies = satelliteAnomalies.value.toMutableList()
-                currentAnomalies.add(0, anomaly)
-                if (currentAnomalies.size > 100) {
-                    currentAnomalies.removeLast()
-                }
-                satelliteAnomalies.value = currentAnomalies
-                broadcastSatelliteData()
-
-                // Convert anomaly to detection using the handler
-                // The handler implements settings-based filtering, NTN analysis,
-                // and proper device type classification (SATELLITE_NTN vs STINGRAY_IMSI)
-                val connectionState = satelliteMonitor?.satelliteState?.value
-                    ?: com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState()
-
-                val detection = processSatelliteWithHandler(anomaly, connectionState)
-                if (detection != null) {
-                    handleDetection(detection)
-                }
-            }
-        }
+        seenWifiNetworks.value = currentList
+        broadcastSeenWifiNetworks()
     }
-    
-    private fun stopSatelliteMonitoring() {
-        satelliteStateJob?.cancel()
-        satelliteStateJob = null
-        satelliteAnomalyJob?.cancel()
-        satelliteAnomalyJob = null
-        satelliteMonitor?.stopMonitoring()
-        Log.d(TAG, "Satellite monitoring stopped")
+
+    // ==================== Status ====================
+
+    private fun buildStatusText(): String {
+        val parts = mutableListOf<String>()
+        parts.add("Detections: ${detectionCount.value}")
+
+        when (val ble = bleStatus.value) {
+            is SubsystemStatus.Error -> parts.add("BLE: Error ${ble.code}")
+            is SubsystemStatus.PermissionDenied -> parts.add("BLE: No permission")
+            is SubsystemStatus.Disabled -> parts.add("BLE: Disabled")
+            else -> {}
+        }
+
+        when (wifiStatus.value) {
+            is SubsystemStatus.Error -> parts.add("WiFi: Error")
+            is SubsystemStatus.PermissionDenied -> parts.add("WiFi: No permission")
+            is SubsystemStatus.Disabled -> parts.add("WiFi: Disabled")
+            else -> {}
+        }
+
+        return parts.joinToString(" | ")
     }
-    
-    /**
-     * Legacy method for converting satellite anomalies to detections.
-     *
-     * @deprecated Use [processSatelliteWithHandler] instead, which delegates to
-     * [SatelliteDetectionHandler] for more comprehensive analysis including:
-     * - Settings-based pattern filtering
-     * - NTN parameter validation
-     * - Proper device type classification (SATELLITE_NTN vs STINGRAY_IMSI)
-     * - AI prompt generation
-     *
-     * TODO: Remove this method once all callers are migrated to the handler.
-     */
-    @Deprecated(
-        message = "Use processSatelliteWithHandler for handler-based detection",
-        replaceWith = ReplaceWith("processSatelliteWithHandler(anomaly, connectionState)")
-    )
-    private fun satelliteAnomalyToDetection(anomaly: com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly): Detection? {
-        val threatLevel = when (anomaly.severity) {
-            com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.CRITICAL -> ThreatLevel.CRITICAL
-            com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.HIGH -> ThreatLevel.HIGH
-            com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.MEDIUM -> ThreatLevel.MEDIUM
-            com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.LOW -> ThreatLevel.LOW
-            com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.INFO -> ThreatLevel.LOW
-        }
 
-        val detectionMethod = when (anomaly.type) {
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.UNEXPECTED_SATELLITE_CONNECTION,
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.SATELLITE_IN_COVERED_AREA -> DetectionMethod.SAT_UNEXPECTED_CONNECTION
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.FORCED_SATELLITE_HANDOFF -> DetectionMethod.SAT_FORCED_HANDOFF
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.DOWNGRADE_TO_SATELLITE -> DetectionMethod.SAT_DOWNGRADE
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.SUSPICIOUS_NTN_PARAMETERS,
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.NTN_BAND_MISMATCH -> DetectionMethod.SAT_SUSPICIOUS_NTN
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.TIMING_ADVANCE_ANOMALY,
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomalyType.EPHEMERIS_MISMATCH -> DetectionMethod.SAT_TIMING_ANOMALY
-            else -> DetectionMethod.SAT_UNEXPECTED_CONNECTION
-        }
-
-        return Detection(
-            id = UUID.randomUUID().toString(),
-            timestamp = anomaly.timestamp,
-            protocol = DetectionProtocol.CELLULAR,
-            detectionMethod = detectionMethod,
-            deviceType = DeviceType.STINGRAY_IMSI,
-            deviceName = "🛰️ ${anomaly.type.name.replace("_", " ")}",
-            rssi = -100, // Unknown for satellite
-            signalStrength = SignalStrength.UNKNOWN,
-            latitude = currentLocation?.latitude,
-            longitude = currentLocation?.longitude,
-            threatLevel = threatLevel,
-            threatScore = when (anomaly.severity) {
-                com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.CRITICAL -> 100
-                com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.HIGH -> 80
-                com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.MEDIUM -> 50
-                com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.LOW -> 30
-                com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.INFO -> 10
-            },
-            manufacturer = "Satellite Network",
-            matchedPatterns = anomaly.description
+    internal fun logError(subsystem: String, code: Int, message: String, recoverable: Boolean = true) {
+        val error = ScanError(
+            subsystem = subsystem,
+            code = code,
+            message = message,
+            recoverable = recoverable
         )
-    }
-    
-    private fun hasTelephonyPermissions(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.READ_PHONE_STATE
-        ) == PackageManager.PERMISSION_GRANTED
-    }
+        Log.e(TAG, "[$subsystem] Error $code: $message")
 
-    private fun hasAudioPermissions(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-
-    // ==================== Rogue WiFi Monitoring ====================
-
-    private var rogueWifiStatusJob: Job? = null
-    private var rogueWifiAnomalyJob: Job? = null
-    private var rogueWifiEventsJob: Job? = null
-
-    private fun startRogueWifiMonitoring() {
-        Log.d(TAG, "Starting rogue WiFi monitoring")
-
-        rogueWifiMonitor?.startMonitoring()
-
-        // Collect status updates
-        rogueWifiStatusJob = serviceScope.launch {
-            rogueWifiMonitor?.wifiStatus?.collect { status ->
-                Companion.rogueWifiStatus.value = status
-                broadcastRogueWifiData()
-            }
+        val currentErrors = errorLog.value.toMutableList()
+        currentErrors.add(0, error)
+        if (currentErrors.size > 50) {
+            currentErrors.removeAt(currentErrors.lastIndex)
         }
-
-        // Collect suspicious networks
-        suspiciousNetworksJob = serviceScope.launch {
-            rogueWifiMonitor?.suspiciousNetworks?.collect { networks ->
-                Companion.suspiciousNetworks.value = networks
-                broadcastRogueWifiData()
-            }
-        }
-
-        // Collect events
-        rogueWifiEventsJob = serviceScope.launch {
-            rogueWifiMonitor?.wifiEvents?.collect { events ->
-                Companion.rogueWifiEvents.value = events
-                broadcastRogueWifiData()
-            }
-        }
-
-        // Collect anomalies and convert to detections
-        rogueWifiAnomalyJob = serviceScope.launch {
-            rogueWifiMonitor?.anomalies?.collect { anomalies ->
-                Companion.rogueWifiAnomalies.value = anomalies
-                broadcastRogueWifiData()
-
-                for (anomaly in anomalies) {
-                    // Send broadcast for automation apps
-                    sendWifiAnomalyBroadcast(anomaly)
-
-                    val detection = rogueWifiMonitor?.anomalyToDetection(anomaly)
-                    detection?.let { det ->
-                        // Check if we already have this detection
-                        val existing = det.macAddress?.let { repository.getDetectionByMacAddress(it) }
-                            ?: det.ssid?.let { repository.getDetectionBySsid(it) }
-
-                        if (existing == null) {
-                            try {
-                                // Store enriched heuristics data for LLM analysis
-                                anomaly.followingAnalysis?.let { analysis ->
-                                    enrichedDataCache.putWifiFollowing(det.id, analysis)
-                                    Log.d(TAG, "Stored WiFi following heuristics for detection ${det.id} (confidence: ${analysis.followingConfidence}%)")
-                                }
-
-                                insertDetectionWithAnalysis(det)
-
-                                if (anomaly.severity == ThreatLevel.CRITICAL ||
-                                    anomaly.severity == ThreatLevel.HIGH) {
-                                    alertUser(det)
-                                }
-
-                                lastDetection.value = det
-                                detectionCount.value = repository.getTotalDetectionCount()
-                                broadcastLastDetection()
-                                broadcastStateToClients()
-                                broadcastDetectionRefresh()
-
-                                if (BuildConfig.DEBUG) {
-                                    Log.w(TAG, "WIFI ANOMALY: ${anomaly.type.displayName} - ${anomaly.description}")
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error saving WiFi detection: ${e.message}", e)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Update monitor location when GPS updates
-        rogueWifiLocationJob = serviceScope.launch {
-            while (isScanning.value) {
-                currentLocation?.let { loc ->
-                    rogueWifiMonitor?.updateLocation(loc.latitude, loc.longitude)
-                }
-                delay(5000)
-            }
-        }
-    }
-
-    private fun stopRogueWifiMonitoring() {
-        rogueWifiLocationJob?.cancel()
-        rogueWifiLocationJob = null
-        suspiciousNetworksJob?.cancel()
-        suspiciousNetworksJob = null
-        rogueWifiStatusJob?.cancel()
-        rogueWifiStatusJob = null
-        rogueWifiAnomalyJob?.cancel()
-        rogueWifiAnomalyJob = null
-        rogueWifiEventsJob?.cancel()
-        rogueWifiEventsJob = null
-        rogueWifiMonitor?.stopMonitoring()
-        Log.d(TAG, "Rogue WiFi monitoring stopped")
-    }
-
-    // ==================== RF Signal Analysis ====================
-
-    private var rfStatusJob: Job? = null
-    private var rfAnomalyJob: Job? = null
-    private var rfEventsJob: Job? = null
-    private var rfDronesJob: Job? = null
-
-    private fun startRfSignalAnalysis() {
-        // Only start RF analysis if RF detection is enabled
-        if (currentDetectionSettings?.enableRfDetection != true) {
-            Log.d(TAG, "RF signal analysis disabled by settings, skipping")
-            return
-        }
-        Log.d(TAG, "Starting RF signal analysis")
-
-        rfSignalAnalyzer?.startMonitoring()
-
-        // Collect status updates
-        rfStatusJob = serviceScope.launch {
-            rfSignalAnalyzer?.rfStatus?.collect { status ->
-                Companion.rfStatus.value = status
-                broadcastRfData()
-            }
-        }
-
-        // Collect events
-        rfEventsJob = serviceScope.launch {
-            rfSignalAnalyzer?.rfEvents?.collect { events ->
-                Companion.rfEvents.value = events
-                broadcastRfData()
-            }
-        }
-
-        // Collect detected drones
-        rfDronesJob = serviceScope.launch {
-            rfSignalAnalyzer?.dronesDetected?.collect { drones ->
-                Companion.detectedDrones.value = drones
-                broadcastRfData()
-
-                // Convert new drones to detections
-                for (drone in drones) {
-                    val detection = rfSignalAnalyzer?.droneToDetection(drone)
-                    detection?.let { det ->
-                        val existing = det.macAddress?.let { repository.getDetectionByMacAddress(it) }
-                        if (existing == null) {
-                            try {
-                                insertDetectionWithAnalysis(det)
-                                alertUser(det)
-                                lastDetection.value = det
-                                detectionCount.value = repository.getTotalDetectionCount()
-                                broadcastLastDetection()
-                                broadcastStateToClients()
-                                broadcastDetectionRefresh()
-                                Log.w(TAG, "DRONE DETECTED: ${drone.manufacturer} at ${drone.estimatedDistance}")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error saving drone detection: ${e.message}", e)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Collect anomalies and convert to detections
-        rfAnomalyJob = serviceScope.launch {
-            rfSignalAnalyzer?.anomalies?.collect { anomalies ->
-                Companion.rfAnomalies.value = anomalies
-                broadcastRfData()
-
-                for (anomaly in anomalies) {
-                    // Send broadcast for automation apps
-                    sendRfAnomalyBroadcast(anomaly)
-
-                    val detection = rfSignalAnalyzer?.anomalyToDetection(anomaly)
-                    detection?.let { det ->
-                        // Use timestamp-based unique ID for RF anomalies
-                        val existing = repository.getDetectionBySsid(det.deviceName ?: "")
-                        if (existing == null) {
-                            try {
-                                insertDetectionWithAnalysis(det)
-
-                                if (anomaly.severity == ThreatLevel.CRITICAL ||
-                                    anomaly.severity == ThreatLevel.HIGH) {
-                                    alertUser(det)
-                                }
-
-                                lastDetection.value = det
-                                detectionCount.value = repository.getTotalDetectionCount()
-                                broadcastLastDetection()
-                                broadcastStateToClients()
-                                broadcastDetectionRefresh()
-
-                                if (BuildConfig.DEBUG) {
-                                    Log.w(TAG, "RF ANOMALY: ${anomaly.type.displayName} - ${anomaly.description}")
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error saving RF detection: ${e.message}", e)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Update analyzer location
-        rfLocationJob = serviceScope.launch {
-            while (isScanning.value) {
-                currentLocation?.let { loc ->
-                    rfSignalAnalyzer?.updateLocation(loc.latitude, loc.longitude)
-                }
-                delay(5000)
-            }
-        }
-    }
-
-    private fun stopRfSignalAnalysis() {
-        rfLocationJob?.cancel()
-        rfLocationJob = null
-        rfStatusJob?.cancel()
-        rfStatusJob = null
-        rfAnomalyJob?.cancel()
-        rfAnomalyJob = null
-        rfEventsJob?.cancel()
-        rfEventsJob = null
-        rfDronesJob?.cancel()
-        rfDronesJob = null
-        rfSignalAnalyzer?.stopMonitoring()
-        Log.d(TAG, "RF signal analysis stopped")
-    }
-
-    // ==================== Ultrasonic Detection ====================
-
-    private var ultrasonicStatusJob: Job? = null
-    private var ultrasonicAnomalyJob: Job? = null
-    private var ultrasonicEventsJob: Job? = null
-    private var ultrasonicBeaconsJob: Job? = null
-
-    private fun startUltrasonicDetection() {
-        // Double-check that user has opted in with consent
-        if (!currentPrivacySettings.ultrasonicDetectionEnabled || !currentPrivacySettings.ultrasonicConsentAcknowledged) {
-            Log.w(TAG, "Ultrasonic detection not enabled - user must opt-in via Privacy settings")
-            return
-        }
-
-        if (!hasAudioPermissions()) {
-            Log.w(TAG, "Missing audio permissions for ultrasonic detection")
-            return
-        }
-
-        Log.d(TAG, "Starting ultrasonic beacon detection (user consented, audio encrypted in memory)")
-
-        ultrasonicDetector?.startMonitoring()
-
-        // Collect status updates
-        ultrasonicStatusJob = serviceScope.launch {
-            ultrasonicDetector?.status?.collect { status ->
-                Companion.ultrasonicStatus.value = status
-                broadcastUltrasonicData()
-            }
-        }
-
-        // Collect events
-        ultrasonicEventsJob = serviceScope.launch {
-            ultrasonicDetector?.events?.collect { events ->
-                Companion.ultrasonicEvents.value = events
-                broadcastUltrasonicData()
-            }
-        }
-
-        // Collect active beacons
-        ultrasonicBeaconsJob = serviceScope.launch {
-            ultrasonicDetector?.beaconsDetected?.collect { beacons ->
-                Companion.ultrasonicBeacons.value = beacons
-                broadcastUltrasonicData()
-            }
-        }
-
-        // Collect anomalies and convert to detections
-        ultrasonicAnomalyJob = serviceScope.launch {
-            ultrasonicDetector?.anomalies?.collect { anomalies ->
-                Companion.ultrasonicAnomalies.value = anomalies
-                broadcastUltrasonicData()
-
-                for (anomaly in anomalies) {
-                    // Send broadcast for automation apps
-                    sendUltrasonicAnomalyBroadcast(anomaly)
-
-                    val detection = ultrasonicDetector?.anomalyToDetection(anomaly)
-                    detection?.let { det ->
-                        // Use frequency as unique identifier
-                        val existing = det.ssid?.let { repository.getDetectionBySsid(it) }
-                        if (existing == null) {
-                            try {
-                                // Store enriched heuristics data for LLM analysis
-                                anomaly.analysis?.let { analysis ->
-                                    enrichedDataCache.putUltrasonic(det.id, analysis)
-                                    Log.d(TAG, "Stored ultrasonic heuristics for detection ${det.id} (tracking likelihood: ${analysis.trackingLikelihood}%)")
-                                }
-
-                                insertDetectionWithAnalysis(det)
-
-                                if (anomaly.severity == ThreatLevel.CRITICAL ||
-                                    anomaly.severity == ThreatLevel.HIGH) {
-                                    alertUser(det)
-                                }
-
-                                lastDetection.value = det
-                                detectionCount.value = repository.getTotalDetectionCount()
-                                broadcastLastDetection()
-                                broadcastStateToClients()
-                                broadcastDetectionRefresh()
-
-                                Log.w(TAG, "ULTRASONIC: ${anomaly.type.displayName} - ${anomaly.frequency}Hz")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error saving ultrasonic detection: ${e.message}", e)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Update detector location
-        ultrasonicLocationJob = serviceScope.launch {
-            while (isScanning.value) {
-                currentLocation?.let { loc ->
-                    ultrasonicDetector?.updateLocation(loc.latitude, loc.longitude)
-                }
-                delay(5000)
-            }
-        }
-    }
-
-    private fun stopUltrasonicDetection() {
-        ultrasonicLocationJob?.cancel()
-        ultrasonicLocationJob = null
-        ultrasonicStatusJob?.cancel()
-        ultrasonicStatusJob = null
-        ultrasonicAnomalyJob?.cancel()
-        ultrasonicAnomalyJob = null
-        ultrasonicEventsJob?.cancel()
-        ultrasonicEventsJob = null
-        ultrasonicBeaconsJob?.cancel()
-        ultrasonicBeaconsJob = null
-        ultrasonicDetector?.stopMonitoring()
-        Log.d(TAG, "Ultrasonic detection stopped")
-    }
-
-    // ==================== GNSS Satellite Monitoring ====================
-
-    private var gnssStatusJob: Job? = null
-    private var gnssAnomalyJob: Job? = null
-    private var gnssEventsJob: Job? = null
-    private var gnssSatellitesJob: Job? = null
-    private var gnssMeasurementsJob: Job? = null
-
-    @SuppressLint("MissingPermission")
-    private fun startGnssMonitoring() {
-        // Only start GNSS monitoring if enabled in settings
-        if (currentDetectionSettings?.enableGnssDetection != true) {
-            Log.d(TAG, "GNSS monitoring disabled by settings, skipping")
-            gnssMonitorStatus.value = SubsystemStatus.Disabled
-            return
-        }
-
-        if (!hasLocationPermissions()) {
-            gnssMonitorStatus.value = SubsystemStatus.PermissionDenied("ACCESS_FINE_LOCATION")
-            Log.w(TAG, "Missing location permissions for GNSS monitoring")
-            return
-        }
-
-        Log.d(TAG, "Starting GNSS satellite monitoring for spoofing/jamming detection")
-        gnssMonitorStatus.value = SubsystemStatus.Active
-
-        gnssSatelliteMonitor?.startMonitoring()
-
-        // Collect status updates
-        gnssStatusJob = serviceScope.launch {
-            gnssSatelliteMonitor?.gnssStatus?.collect { status ->
-                Companion.gnssStatus.value = status
-                broadcastGnssData()
-            }
-        }
-
-        // Collect satellite info
-        gnssSatellitesJob = serviceScope.launch {
-            gnssSatelliteMonitor?.satellites?.collect { sats ->
-                Companion.gnssSatellites.value = sats
-                broadcastGnssData()
-            }
-        }
-
-        // Collect events
-        gnssEventsJob = serviceScope.launch {
-            gnssSatelliteMonitor?.events?.collect { events ->
-                Companion.gnssEvents.value = events
-                broadcastGnssData()
-            }
-        }
-
-        // Collect raw measurements
-        gnssMeasurementsJob = serviceScope.launch {
-            gnssSatelliteMonitor?.measurements?.collect { measurements ->
-                Companion.gnssMeasurements.value = measurements
-                broadcastGnssData()
-            }
-        }
-
-        // Collect anomalies and convert to detections
-        // Note: processedGnssAnomalyIds is now a class-level property to persist across restarts
-
-        gnssAnomalyJob = serviceScope.launch {
-            gnssSatelliteMonitor?.anomalies?.collect { anomalies ->
-                Companion.gnssAnomalies.value = anomalies
-                broadcastGnssData()
-
-                for (anomaly in anomalies) {
-                    // Skip if already processed in this session
-                    if (anomaly.id in processedGnssAnomalyIds) {
-                        continue
-                    }
-
-                    // Send broadcast for automation apps
-                    sendGnssAnomalyBroadcast(anomaly)
-
-                    val detection = gnssSatelliteMonitor?.anomalyToDetection(anomaly)
-                    detection?.let { det ->
-                        // Use anomaly ID as unique identifier
-                        val detWithId = det.copy(macAddress = anomaly.id)
-                        val existing = repository.getDetectionByMacAddress(anomaly.id)
-                        if (existing == null) {
-                            try {
-                                // Store enriched heuristics data for LLM analysis
-                                anomaly.analysis?.let { analysis ->
-                                    enrichedDataCache.putGnss(detWithId.id, analysis)
-                                    Log.d(TAG, "Stored GNSS heuristics for detection ${detWithId.id} (spoofing: ${analysis.spoofingLikelihood}%, jamming: ${analysis.jammingLikelihood}%)")
-                                }
-
-                                insertDetectionWithAnalysis(detWithId)
-                                processedGnssAnomalyIds.add(anomaly.id)
-
-                                if (anomaly.severity == ThreatLevel.CRITICAL ||
-                                    anomaly.severity == ThreatLevel.HIGH) {
-                                    alertUser(det)
-                                }
-
-                                lastDetection.value = det
-                                detectionCount.value = repository.getTotalDetectionCount()
-                                broadcastLastDetection()
-                                broadcastStateToClients()
-                                broadcastDetectionRefresh()
-
-                                Log.w(TAG, "GNSS: ${anomaly.type.displayName} - ${anomaly.description}")
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error saving GNSS detection: ${e.message}", e)
-                            }
-                        } else {
-                            // Already in database, mark as processed
-                            processedGnssAnomalyIds.add(anomaly.id)
-                        }
-                    }
-                }
-            }
-        }
-
-        // Update monitor location
-        gnssLocationJob = serviceScope.launch {
-            while (isScanning.value) {
-                currentLocation?.let { loc ->
-                    gnssSatelliteMonitor?.updateLocation(loc.latitude, loc.longitude)
-                }
-                delay(5000)
-            }
-        }
-    }
-
-    private fun stopGnssMonitoring() {
-        gnssLocationJob?.cancel()
-        gnssLocationJob = null
-        gnssStatusJob?.cancel()
-        gnssStatusJob = null
-        gnssAnomalyJob?.cancel()
-        gnssAnomalyJob = null
-        gnssEventsJob?.cancel()
-        gnssEventsJob = null
-        gnssSatellitesJob?.cancel()
-        gnssSatellitesJob = null
-        gnssMeasurementsJob?.cancel()
-        gnssMeasurementsJob = null
-        gnssSatelliteMonitor?.stopMonitoring()
-        gnssMonitorStatus.value = SubsystemStatus.Idle
-        Log.d(TAG, "GNSS monitoring stopped")
+        errorLog.value = currentErrors
+        broadcastErrorLog()
     }
 
     // ==================== BLE Scanning ====================
-    
+
     @SuppressLint("MissingPermission")
     private fun startBleScan(aggressiveMode: Boolean = true) {
         if (!hasBluetoothPermissions()) {
@@ -2846,11 +1320,9 @@ class ScanningService : Service() {
 
         // Build aggressive scan settings for maximum detection capability
         val scanSettings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)  // Continuous radio usage - highest detection rate
-            .setReportDelay(0)  // Immediate results, no batching
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setReportDelay(0)
             .apply {
-                // MATCH_MODE_AGGRESSIVE reports devices with weak signals that might otherwise be filtered
-                // This is critical for detecting fast-moving vehicles or distant surveillance equipment
                 if (aggressiveMode) {
                     setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
                     setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
@@ -2863,7 +1335,7 @@ class ScanningService : Service() {
             bleScanner?.startScan(null, scanSettings, bleScanCallback)
             isBleScanningActive = true
             bleStatus.value = SubsystemStatus.Active
-            // Initialize watchdog timer - give the scanner time to start receiving results
+            // Initialize watchdog timer
             lastBleScanResultTime = System.currentTimeMillis()
             bleWatchdogFailures = 0
             // Update total BLE scan count
@@ -2878,7 +1350,7 @@ class ScanningService : Service() {
             logError("BLE", -1, "Failed to start scan: ${e.message}", recoverable = true)
         }
     }
-    
+
     @SuppressLint("MissingPermission")
     private fun stopBleScan() {
         if (!isBleScanningActive) return
@@ -2893,28 +1365,27 @@ class ScanningService : Service() {
             Log.e(TAG, "Failed to stop BLE scan", e)
         }
     }
-    
+
     /** BLE scan callback - handles scan results for surveillance device detection */
     private val bleScanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             // Update watchdog timestamp - we're receiving results
             lastBleScanResultTime = System.currentTimeMillis()
-            bleWatchdogFailures = 0  // Reset failure count on successful result
+            bleWatchdogFailures = 0
             serviceScope.launch {
                 processBleScanResult(result)
             }
         }
 
         override fun onBatchScanResults(results: MutableList<ScanResult>) {
-            // Update watchdog timestamp for batch results too
             lastBleScanResultTime = System.currentTimeMillis()
             bleWatchdogFailures = 0
             serviceScope.launch {
                 results.forEach { processBleScanResult(it) }
             }
         }
-        
+
         override fun onScanFailed(errorCode: Int) {
             val errorMessage = when (errorCode) {
                 SCAN_FAILED_ALREADY_STARTED -> "Scan already started"
@@ -2929,7 +1400,6 @@ class ScanningService : Service() {
 
             // Handle SCAN_FAILED_ALREADY_STARTED specially - the scan IS running
             if (errorCode == SCAN_FAILED_ALREADY_STARTED) {
-                // Scan is already active, mark it as such and don't log as error
                 isBleScanningActive = true
                 bleStatus.value = SubsystemStatus.Active
                 return
@@ -2939,12 +1409,12 @@ class ScanningService : Service() {
             logError("BLE", errorCode, errorMessage, recoverable = errorCode != SCAN_FAILED_FEATURE_UNSUPPORTED)
             isBleScanningActive = false
 
-            // Report error to health check system - this triggers automatic restart logic
+            // Report error to health check system
             val recoverable = errorCode != SCAN_FAILED_FEATURE_UNSUPPORTED
             detectorCallbackImpl.onError(DetectorHealthStatus.DETECTOR_BLE, errorMessage, recoverable)
         }
     }
-    
+
     @SuppressLint("MissingPermission")
     private suspend fun processBleScanResult(result: ScanResult) {
         val device = result.device
@@ -2981,19 +1451,6 @@ class ScanningService : Service() {
         }
 
         // ==================== Handler-Based Detection ====================
-        // Delegate detection logic to the BleDetectionHandler for:
-        // - Consistent detection patterns across all BLE scans
-        // - Centralized AI prompt generation
-        // - Better testability and separation of concerns
-        //
-        // The handler implements all detection methods:
-        // 1. Advertising rate spike (Axon Signal trigger activation)
-        // 2. Raven service UUID matching
-        // 3. BLE device name pattern matching
-        // 4. BLE service UUID matching (AirTag, Tile, SmartTag)
-        // 5. MAC prefix matching
-        // 6. Consumer tracker detection
-
         val handlerResult = processBleWithHandler(result)
         if (handlerResult != null) {
             // Handler found a detection - process it
@@ -3008,18 +1465,12 @@ class ScanningService : Service() {
         }
 
         // ==================== No Detection - Fallback Logic ====================
-        // No surveillance pattern matched - handle seen devices and learning mode
-
         // Track as seen device if enabled
         if (currentSettings.value.trackSeenDevices) {
             trackSeenBleDevice(macAddress, deviceName, rssi, serviceUuids, manufacturerData, advertisingRate)
         }
 
         // ==================== Learned Signature Detection ====================
-        // Check if this device matches any user-learned signatures.
-        // This uses the LearnedSignatureHandler which encapsulates the matching logic.
-        // Learned signatures are user-confirmed suspicious devices that don't
-        // match standard patterns but the user wants to track.
         if (learnedSignatureHandler.learningModeEnabled.value) {
             checkLearnedSignaturesViaHandler(macAddress, deviceName, rssi, serviceUuids, manufacturerData)
         }
@@ -3049,74 +1500,14 @@ class ScanningService : Service() {
         }
     }
 
-    private fun trackSeenBleDevice(
-        macAddress: String,
-        deviceName: String?,
-        rssi: Int,
-        serviceUuids: List<java.util.UUID>,
-        manufacturerData: Map<Int, String> = emptyMap(),
-        advertisingRate: Float = 0f
-    ) {
-        // Synchronize to prevent race conditions when multiple scan results arrive concurrently
-        synchronized(seenDevicesLock) {
-            val currentList = seenBleDevices.value.toMutableList()
-            val existingIndex = currentList.indexOfFirst { it.id == macAddress }
-
-            if (existingIndex >= 0) {
-                // Update existing
-                val existing = currentList[existingIndex]
-                currentList[existingIndex] = existing.copy(
-                    name = deviceName ?: existing.name,
-                    rssi = rssi,
-                    lastSeen = System.currentTimeMillis(),
-                    seenCount = existing.seenCount + 1,
-                    manufacturerData = if (manufacturerData.isNotEmpty()) manufacturerData else existing.manufacturerData,
-                    advertisingRate = advertisingRate
-                )
-            } else {
-                // Add new
-                val manufacturer = try {
-                    // Try to identify manufacturer from MAC OUI
-                    val oui = macAddress.take(8).uppercase()
-                    DetectionPatterns.getManufacturerFromOui(oui)
-                } catch (e: Exception) { null }
-
-                currentList.add(0, SeenDevice(
-                    id = macAddress,
-                    name = deviceName,
-                    type = "BLE",
-                    rssi = rssi,
-                    manufacturer = manufacturer,
-                    serviceUuids = serviceUuids.map { it.toString() },
-                    manufacturerData = manufacturerData,
-                    advertisingRate = advertisingRate
-                ))
-
-                // Limit list size
-                if (currentList.size > MAX_SEEN_DEVICES) {
-                    currentList.removeAt(currentList.lastIndex)
-                }
-            }
-
-            seenBleDevices.value = currentList
-            broadcastSeenBleDevices()
-        }
-    }
-
     // ==================== WiFi Scanning ====================
 
     // WiFi scan optimization: track last successful scan to avoid wasted API calls
-    // Android throttles WiFi scans: 4 scans / 2 min foreground, 1 scan / 30 min background
     private var lastSuccessfulWifiScanTime: Long = 0L
     private var wifiScanAttemptsSinceSuccess: Int = 0
 
-    // Minimum interval between WiFi scan attempts (aggressive but respecting Android's limits)
-    // Foreground: ~30 seconds is safe (4 scans / 2 min = 1 scan / 30 sec)
-    // We use 20 seconds for more frequent scanning, accepting some throttle risk
     private val MIN_WIFI_SCAN_INTERVAL_MS = 20_000L
-
-    // Adaptive backoff: increase interval after consecutive throttles
-    private val MAX_WIFI_SCAN_INTERVAL_MS = 120_000L  // 2 minutes max backoff
+    private val MAX_WIFI_SCAN_INTERVAL_MS = 120_000L
 
     @SuppressLint("MissingPermission")
     private fun startWifiScan() {
@@ -3136,8 +1527,6 @@ class ScanningService : Service() {
         val now = System.currentTimeMillis()
         val timeSinceLastScan = now - lastSuccessfulWifiScanTime
 
-        // Calculate adaptive interval based on recent throttle history
-        // Each throttled scan doubles the wait time (up to max)
         val adaptiveInterval = if (wifiScanAttemptsSinceSuccess > 0) {
             (MIN_WIFI_SCAN_INTERVAL_MS * (1 shl wifiScanAttemptsSinceSuccess.coerceAtMost(3)))
                 .coerceAtMost(MAX_WIFI_SCAN_INTERVAL_MS)
@@ -3146,7 +1535,6 @@ class ScanningService : Service() {
         }
 
         if (timeSinceLastScan < adaptiveInterval) {
-            // Skip this scan request - we're within the throttle window
             val remainingMs = adaptiveInterval - timeSinceLastScan
             Log.d(TAG, "WiFi scan skipped (throttle optimization): ${remainingMs}ms until next allowed scan")
             return
@@ -3165,10 +1553,8 @@ class ScanningService : Service() {
                 wifiStatus.value = SubsystemStatus.Active
                 Log.d(TAG, "WiFi scan started (attempt ${wifiScanAttemptsSinceSuccess + 1})")
             } else {
-                // Rejection means we're throttled - increase backoff
                 wifiScanAttemptsSinceSuccess++
                 Log.d(TAG, "WiFi scan request rejected (throttled, backoff level: $wifiScanAttemptsSinceSuccess)")
-                // Status will be updated by the receiver
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start WiFi scan", e)
@@ -3176,7 +1562,7 @@ class ScanningService : Service() {
             logError("WiFi", -1, "Failed to start scan: ${e.message}", recoverable = true)
         }
     }
-    
+
     private fun registerWifiReceiver() {
         if (wifiScanReceiver != null) return
 
@@ -3185,7 +1571,6 @@ class ScanningService : Service() {
                 if (intent?.action == WifiManager.SCAN_RESULTS_AVAILABLE_ACTION) {
                     val success = intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false)
                     if (success) {
-                        // Record successful scan time and reset backoff
                         lastSuccessfulWifiScanTime = System.currentTimeMillis()
                         wifiScanAttemptsSinceSuccess = 0
 
@@ -3194,7 +1579,6 @@ class ScanningService : Service() {
                             processWifiScanResults()
                         }
 
-                        // Update stats with successful scan
                         val stats = scanStats.value
                         scanStats.value = stats.copy(
                             successfulWifiScans = stats.successfulWifiScans + 1,
@@ -3202,12 +1586,10 @@ class ScanningService : Service() {
                         )
                         broadcastScanStats()
 
-                        // Report successful scan for health monitoring
                         detectorCallbackImpl.onScanSuccess(DetectorHealthStatus.DETECTOR_WIFI)
 
                         Log.d(TAG, "WiFi scan successful, backoff reset")
                     } else {
-                        // Scan failed or was throttled - increase backoff
                         wifiScanAttemptsSinceSuccess++
 
                         val stats = scanStats.value
@@ -3216,7 +1598,6 @@ class ScanningService : Service() {
                         )
                         broadcastScanStats()
 
-                        // Only log throttle error once per minute to reduce spam
                         val lastThrottle = lastWifiThrottleLogTime
                         val now = System.currentTimeMillis()
                         if (lastThrottle == null || now - lastThrottle > 60000) {
@@ -3232,234 +1613,21 @@ class ScanningService : Service() {
 
         val intentFilter = IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
         registerReceiver(wifiScanReceiver, intentFilter)
-        // Update detector health status - WiFi is now actively scanning
         detectorCallbackImpl.onDetectorStarted(DetectorHealthStatus.DETECTOR_WIFI)
     }
-    
+
     private var lastWifiThrottleLogTime: Long? = null
-    
+
     private fun unregisterWifiReceiver() {
         wifiScanReceiver?.let {
             try {
                 unregisterReceiver(it)
-                // Update detector health status - WiFi scanning stopped
                 detectorCallbackImpl.onDetectorStopped(DetectorHealthStatus.DETECTOR_WIFI)
             } catch (e: Exception) {
                 Log.e(TAG, "Error unregistering WiFi receiver", e)
             }
         }
         wifiScanReceiver = null
-    }
-
-    // ==================== Nuke Receiver ====================
-
-    /**
-     * Register a receiver to handle nuke broadcasts from the main process.
-     * This allows graceful shutdown of database connections before the nuke wipes files.
-     */
-    private fun registerNukeReceiver() {
-        if (nukeReceiver != null) return
-
-        nukeReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                when (intent.action) {
-                    ACTION_NUKE_INITIATED -> {
-                        Log.w(TAG, "NUKE BROADCAST RECEIVED - initiating graceful shutdown")
-                        handleNukeInitiated()
-                    }
-                    ACTION_DATABASE_SHUTDOWN -> {
-                        Log.w(TAG, "DATABASE SHUTDOWN BROADCAST RECEIVED - closing database")
-                        handleDatabaseShutdown()
-                    }
-                }
-            }
-        }
-
-        val filter = IntentFilter().apply {
-            addAction(ACTION_NUKE_INITIATED)
-            addAction(ACTION_DATABASE_SHUTDOWN)
-        }
-
-        registerReceiver(nukeReceiver, filter, RECEIVER_NOT_EXPORTED)
-        Log.d(TAG, "Nuke receiver registered")
-    }
-
-    /**
-     * Unregister the nuke receiver.
-     */
-    private fun unregisterNukeReceiver() {
-        nukeReceiver?.let {
-            try {
-                unregisterReceiver(it)
-                Log.d(TAG, "Nuke receiver unregistered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error unregistering nuke receiver", e)
-            }
-        }
-        nukeReceiver = null
-    }
-
-    // ==================== Battery Monitoring ====================
-
-    /**
-     * Register receiver to monitor battery level for adaptive scanning.
-     */
-    private fun registerBatteryReceiver() {
-        if (batteryReceiver != null) return
-
-        batteryReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                intent?.let { updateBatteryState(it) }
-            }
-        }
-
-        val intentFilter = IntentFilter().apply {
-            addAction(Intent.ACTION_BATTERY_CHANGED)
-            addAction(Intent.ACTION_POWER_CONNECTED)
-            addAction(Intent.ACTION_POWER_DISCONNECTED)
-        }
-
-        // Get initial battery state
-        val batteryStatus = registerReceiver(batteryReceiver, intentFilter)
-        batteryStatus?.let { updateBatteryState(it) }
-
-        Log.d(TAG, "Battery receiver registered, initial level: $currentBatteryPercent%, charging: $isCharging")
-    }
-
-    /**
-     * Unregister the battery receiver.
-     */
-    private fun unregisterBatteryReceiver() {
-        batteryReceiver?.let {
-            try {
-                unregisterReceiver(it)
-                Log.d(TAG, "Battery receiver unregistered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error unregistering battery receiver", e)
-            }
-        }
-        batteryReceiver = null
-    }
-
-    /**
-     * Update battery state from intent and recalculate effective scanning mode.
-     */
-    private fun updateBatteryState(intent: Intent) {
-        val level = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
-        val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
-        val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
-
-        if (level >= 0 && scale > 0) {
-            currentBatteryPercent = (level * 100) / scale
-            currentBatteryLevel.value = currentBatteryPercent
-        }
-
-        isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
-                     status == android.os.BatteryManager.BATTERY_STATUS_FULL
-        isBatteryCharging.value = isCharging
-
-        // Update the effective battery mode based on current settings and battery level
-        updateEffectiveBatteryMode()
-    }
-
-    /**
-     * Calculate and update the effective battery-adaptive mode.
-     */
-    private fun updateEffectiveBatteryMode() {
-        // If charging, always use performance mode
-        val effectiveMode = if (isCharging) {
-            com.flockyou.data.BatteryAdaptiveMode.PERFORMANCE
-        } else {
-            // Use settings to determine mode (auto or manual)
-            currentScanSettings.getEffectiveMode(currentBatteryPercent)
-        }
-
-        if (currentBatteryMode.value != effectiveMode) {
-            Log.d(TAG, "Battery mode changed: ${currentBatteryMode.value} -> $effectiveMode " +
-                    "(battery: $currentBatteryPercent%, charging: $isCharging)")
-            currentBatteryMode.value = effectiveMode
-            broadcastBatteryState()
-        }
-    }
-
-    /**
-     * Broadcast battery state to IPC clients.
-     */
-    private fun broadcastBatteryState() {
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_BATTERY_STATE).apply {
-                data = Bundle().apply {
-                    putString("mode", currentBatteryMode.value.id)
-                    putString("modeName", currentBatteryMode.value.displayName)
-                    putInt("batteryPercent", currentBatteryPercent)
-                    putBoolean("isCharging", isCharging)
-                }
-            }
-        }
-    }
-
-    /**
-     * Get the current effective battery multipliers for scan timing.
-     */
-    private fun getBatteryMultipliers(): Pair<Float, Float> {
-        val mode = currentBatteryMode.value
-        return Pair(mode.intervalMultiplier, mode.durationMultiplier)
-    }
-
-    /**
-     * Check if non-essential subsystems should be disabled for current battery mode.
-     */
-    private fun shouldDisableNonEssentialSubsystems(): Boolean {
-        return currentBatteryMode.value.disableNonEssential && !isCharging
-    }
-
-    /**
-     * Handle nuke initiated broadcast - stop all scanning and close database.
-     */
-    private fun handleNukeInitiated() {
-        // Mark database as unavailable to prevent further writes
-        isDatabaseAvailable.value = false
-
-        // Stop all scanning operations immediately
-        serviceScope.launch {
-            try {
-                Log.w(TAG, "Stopping scanning due to nuke")
-                stopScanning()
-
-                // Close the database connection in this process
-                closeDatabaseConnection()
-
-                // Disable auto-restart so service doesn't come back after nuke
-                BootReceiver.setServiceEnabled(this@ScanningService, false)
-                ServiceRestartReceiver.cancelWatchdog(this@ScanningService)
-
-                Log.w(TAG, "Graceful shutdown complete - stopping service")
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error during nuke shutdown", e)
-            }
-        }
-    }
-
-    /**
-     * Handle database shutdown broadcast - close database without stopping service.
-     */
-    private fun handleDatabaseShutdown() {
-        isDatabaseAvailable.value = false
-        closeDatabaseConnection()
-    }
-
-    /**
-     * Close the database connection in this process.
-     */
-    private fun closeDatabaseConnection() {
-        try {
-            com.flockyou.data.repository.FlockYouDatabase.getDatabase(applicationContext).close()
-            Log.d(TAG, "Database connection closed")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing database connection", e)
-        }
     }
 
     @SuppressLint("MissingPermission")
@@ -3477,20 +1645,8 @@ class ScanningService : Service() {
         )
         broadcastScanStats()
 
-        // ==================== Handler-Based WiFi Processing ====================
-        // All WiFi detection is now delegated to WifiDetectionHandler which encapsulates:
-        // 1. SSID pattern matching (Flock Safety, police tech, surveillance patterns)
-        // 2. MAC prefix matching (OUI-based manufacturer identification)
-        // 3. RogueWifiMonitor integration (evil twins, deauth, hidden cameras)
-        // 4. AI prompt generation for WiFi detections
-        //
-        // The handler is registered with DetectionRegistry and can be retrieved via:
-        // val wifiHandler = detectionRegistry.getHandler(DetectionProtocol.WIFI)
+        // Feed results to monitors via handler
         processWifiWithHandler(results)
-
-        // ==================== SSID/MAC Pattern Matching via WifiDetectionHandler ====================
-        // Pattern matching is now handled by WifiDetectionHandler.processData()
-        // which processes all scan results and returns detections
 
         // Update location on the handler before processing
         currentLocation?.let { location ->
@@ -3538,691 +1694,165 @@ class ScanningService : Service() {
             }
         }
     }
-    
-    private fun trackSeenWifiNetwork(bssid: String, ssid: String, rssi: Int) {
-        val currentList = seenWifiNetworks.value.toMutableList()
-        val existingIndex = currentList.indexOfFirst { it.id == bssid }
-        
-        if (existingIndex >= 0) {
-            val existing = currentList[existingIndex]
-            currentList[existingIndex] = existing.copy(
-                name = ssid,
-                rssi = rssi,
-                lastSeen = System.currentTimeMillis(),
-                seenCount = existing.seenCount + 1
-            )
-        } else {
-            val manufacturer = try {
-                val oui = bssid.take(8).uppercase()
-                DetectionPatterns.getManufacturerFromOui(oui)
-            } catch (e: Exception) { null }
-            
-            currentList.add(0, SeenDevice(
-                id = bssid,
-                name = ssid,
-                type = "WiFi",
-                rssi = rssi,
-                manufacturer = manufacturer
-            ))
-            
-            if (currentList.size > MAX_SEEN_DEVICES) {
-                currentList.removeAt(currentList.lastIndex)
-            }
-        }
-        
-        seenWifiNetworks.value = currentList
-        broadcastSeenWifiNetworks()
-    }
 
-    // ==================== Detection Handling ====================
+    // ==================== Nuke Receiver ====================
 
-    /**
-     * Apply privacy settings to a detection before storing.
-     * - Strips location data if storeLocationWithDetections is disabled (Priority 4)
-     */
-    private fun applyPrivacySettings(detection: Detection): Detection {
-        return if (!currentPrivacySettings.storeLocationWithDetections) {
-            // Strip location data for privacy
-            detection.copy(latitude = null, longitude = null)
-        } else {
-            detection
-        }
-    }
+    private fun registerNukeReceiver() {
+        if (nukeReceiver != null) return
 
-    private suspend fun handleDetection(detection: Detection) {
-        // Check if database is available (might be unavailable during nuke)
-        if (!isDatabaseAvailable.value) {
-            Log.w(TAG, "Database unavailable - skipping detection save")
-            return
-        }
-
-        try {
-            // Apply privacy settings (strip location if disabled)
-            val privacyAwareDetection = applyPrivacySettings(detection)
-
-            // Run quick false positive check before storage
-            val detectionWithFp = try {
-                val quickFpResult = falsePositiveAnalyzer.quickRuleBasedCheck(privacyAwareDetection)
-                privacyAwareDetection.copy(
-                    fpScore = quickFpResult.confidence,
-                    fpReason = quickFpResult.primaryReason,
-                    fpCategory = quickFpResult.category?.name,
-                    analyzedAt = System.currentTimeMillis(),
-                    llmAnalyzed = false
-                )
-            } catch (e: Exception) {
-                Log.w(TAG, "FP analysis failed, proceeding without FP score: ${e.message}")
-                privacyAwareDetection
-            }
-
-            // Choose storage based on ephemeral mode (Priority 1)
-            val isNew = if (currentPrivacySettings.ephemeralModeEnabled) {
-                // Ephemeral mode: store in RAM only
-                ephemeralRepository.upsertDetection(detectionWithFp)
-            } else {
-                // Normal mode: persist to encrypted database
-                repository.upsertDetection(detectionWithFp)
-            }
-
-            if (isNew) {
-                // New detection
-                detectionCount.value++
-                scanStats.value = scanStats.value.copy(
-                    detectionsCreated = scanStats.value.detectionsCreated + 1
-                )
-                lastDetection.value = detectionWithFp
-                broadcastLastDetection()
-                broadcastStateToClients()
-
-                // Register with cross-domain analyzer for correlation analysis
-                try {
-                    crossDomainAnalyzer.registerDetection(detectionWithFp)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to register detection with correlation analyzer: ${e.message}")
-                }
-
-                Log.d(TAG, "New detection: ${detectionWithFp.deviceType} - ${detectionWithFp.macAddress ?: detectionWithFp.ssid} (FP score: ${detectionWithFp.fpScore ?: "N/A"})")
-
-                // Queue for enhanced LLM analysis if not in ephemeral mode
-                // This runs in background and will enhance the quick rule-based analysis
-                if (!currentPrivacySettings.ephemeralModeEnabled) {
-                    try {
-                        com.flockyou.worker.BackgroundAnalysisWorker.triggerForDetections(
-                            this@ScanningService,
-                            listOf(detectionWithFp.id)
-                        )
-                        if (BuildConfig.DEBUG) {
-                            Log.d(TAG, "Queued detection for LLM analysis: ${detectionWithFp.id}")
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to queue detection for LLM analysis: ${e.message}")
+        nukeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.action) {
+                    ACTION_NUKE_INITIATED -> {
+                        Log.w(TAG, "NUKE BROADCAST RECEIVED - initiating graceful shutdown")
+                        handleNukeInitiated()
+                    }
+                    ACTION_DATABASE_SHUTDOWN -> {
+                        Log.w(TAG, "DATABASE SHUTDOWN BROADCAST RECEIVED - closing database")
+                        handleDatabaseShutdown()
                     }
                 }
-
-                // Only alert user if FP score is below HIGH_CONFIDENCE_FP_THRESHOLD (0.8f)
-                // High FP confidence means it's likely a false positive - suppress the alert
-                val fpScore = detectionWithFp.fpScore
-                if (fpScore == null || fpScore < com.flockyou.ai.FalsePositiveAnalyzer.HIGH_CONFIDENCE_FP_THRESHOLD) {
-                    alertUser(detectionWithFp)
-                } else {
-                    Log.i(TAG, "Alert suppressed due to high FP confidence: ${detectionWithFp.deviceType} - " +
-                            "${detectionWithFp.macAddress ?: detectionWithFp.ssid} " +
-                            "(FP score: $fpScore, reason: ${detectionWithFp.fpReason})")
-                }
-            } else {
-                // Existing detection - update lastDetection to refresh UI
-                lastDetection.value = detectionWithFp
-                broadcastLastDetection()
-                Log.d(TAG, "Updated detection: ${detectionWithFp.deviceType} - ${detectionWithFp.macAddress ?: detectionWithFp.ssid}")
-            }
-
-            // Emit refresh event to ensure UI updates even if Room Flow doesn't trigger
-            broadcastDetectionRefresh()
-        } catch (e: android.database.sqlite.SQLiteException) {
-            // Database error - likely corrupted or wiped
-            Log.e(TAG, "SQLite error handling detection: ${e.message}", e)
-            handleDatabaseError(e)
-        } catch (e: Exception) {
-            // Check for wrapped database errors
-            if (isDatabaseError(e)) {
-                Log.e(TAG, "Database error handling detection: ${e.message}", e)
-                handleDatabaseError(e)
-            } else {
-                Log.e(TAG, "Error handling detection: ${e.message}", e)
-                logError("Detection", 1001, "Failed to save detection: ${e.message}")
             }
         }
+
+        val filter = IntentFilter().apply {
+            addAction(ACTION_NUKE_INITIATED)
+            addAction(ACTION_DATABASE_SHUTDOWN)
+        }
+
+        registerReceiver(nukeReceiver, filter, RECEIVER_NOT_EXPORTED)
+        Log.d(TAG, "Nuke receiver registered")
+    }
+
+    private fun unregisterNukeReceiver() {
+        nukeReceiver?.let {
+            try {
+                unregisterReceiver(it)
+                Log.d(TAG, "Nuke receiver unregistered")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error unregistering nuke receiver", e)
+            }
+        }
+        nukeReceiver = null
     }
 
     /**
-     * Check if an exception is a database-related error.
+     * Handle nuke initiated broadcast - stop all scanning and close database.
      */
-    private fun isDatabaseError(e: Exception): Boolean {
-        val message = e.message?.lowercase() ?: ""
-        return message.contains("database") ||
-                message.contains("sqlite") ||
-                message.contains("sqlcipher") ||
-                message.contains("file is not a database") ||
-                message.contains("out of memory") ||
-                e.cause is android.database.sqlite.SQLiteException
-    }
-
-    /**
-     * Handle database errors gracefully.
-     * This typically happens when the database is wiped during a nuke operation.
-     */
-    private fun handleDatabaseError(e: Exception) {
-        // Mark database as unavailable
+    private fun handleNukeInitiated() {
         isDatabaseAvailable.value = false
 
-        // Log the error
-        logError("Database", 26, "Database error: ${e.message}", recoverable = false)
-
-        // Switch to ephemeral mode to continue operation without persistent storage
-        Log.w(TAG, "Switching to ephemeral storage due to database error")
-
-        // Update scan status to indicate degraded operation
-        scanStatus.value = ScanStatus.Error("Database unavailable - using memory storage", recoverable = true)
-    }
-
-    // ==================== LLM Warm-up ====================
-
-    /**
-     * Warm up the LLM engine in the background.
-     * This pre-initializes the engine and runs a simple test inference to ensure
-     * the first real FP analysis is fast.
-     *
-     * Runs asynchronously in serviceScope so it doesn't block scanning startup.
-     * Failures are logged but don't crash the service - we fall back to rule-based.
-     */
-    private fun warmUpLlmEngine() {
         serviceScope.launch {
             try {
-                Log.i(TAG, "Starting LLM warm-up in background...")
-                val startTime = System.currentTimeMillis()
-
-                // Check if LLM engine is available
-                val activeEngine = llmEngineManager.activeEngine.value
-                if (activeEngine == com.flockyou.ai.LlmEngine.RULE_BASED) {
-                    Log.d(TAG, "LLM warm-up skipped - using rule-based engine only")
-                    return@launch
-                }
-
-                // Run a simple test prompt to warm up the model
-                // This forces the model to load into memory and JIT compile
-                val warmupPrompt = "Classify: Is a device named 'TestDevice' a surveillance device? Answer YES or NO."
-                val response = llmEngineManager.generateResponse(warmupPrompt)
-
-                val elapsed = System.currentTimeMillis() - startTime
-                if (response != null) {
-                    Log.i(TAG, "LLM warm-up completed in ${elapsed}ms (engine: ${llmEngineManager.activeEngine.value})")
-                } else {
-                    Log.w(TAG, "LLM warm-up completed but returned null response (engine may fall back to rule-based)")
-                }
+                Log.w(TAG, "Stopping scanning due to nuke")
+                stopScanning()
+                closeDatabaseConnection()
+                BootReceiver.setServiceEnabled(this@ScanningService, false)
+                ServiceRestartReceiver.cancelWatchdog(this@ScanningService)
+                Log.w(TAG, "Graceful shutdown complete - stopping service")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             } catch (e: Exception) {
-                Log.e(TAG, "LLM warm-up failed (will use rule-based FP analysis): ${e.message}")
-                // Don't rethrow - warm-up failure is not critical
+                Log.e(TAG, "Error during nuke shutdown", e)
             }
         }
     }
 
-    // ==================== Detection Handler Delegation ====================
-    //
-    // These helper methods delegate detection analysis to the standardized
-    // DetectionHandler system. This allows:
-    // - Consistent detection logic across all protocols
-    // - Better testability and separation of concerns
-    // - Extensibility through the DetectionRegistry
-    // - AI prompt generation for detected devices
-
-    /**
-     * Process a BLE scan result using the BleDetectionHandler.
-     *
-     * Converts the ScanResult to a BleDetectionContext and delegates to the
-     * handler for pattern matching and detection generation.
-     *
-     * @param scanResult The raw BLE scan result from Android
-     * @return BleDetectionResult if a detection was made, null otherwise
-     */
-    @SuppressLint("MissingPermission")
-    private fun processBleWithHandler(scanResult: android.bluetooth.le.ScanResult): BleDetectionResult? {
-        val device = scanResult.device
-        val macAddress = device.address ?: return null
-        val deviceName = device.name
-        val rssi = scanResult.rssi
-
-        // Extract service UUIDs
-        val serviceUuids = scanResult.scanRecord?.serviceUuids?.map { it.uuid } ?: emptyList()
-
-        // Extract manufacturer data
-        val manufacturerData = mutableMapOf<Int, String>()
-        scanResult.scanRecord?.manufacturerSpecificData?.let { data ->
-            for (i in 0 until data.size()) {
-                val key = data.keyAt(i)
-                val value = data.valueAt(i)
-                manufacturerData[key] = value.joinToString("") { "%02X".format(it) }
-            }
-        }
-
-        // Track packet rate for Signal trigger spike detection
-        val advertisingRate = trackPacket(macAddress)
-
-        // Build the detection context
-        val context = BleDetectionContext(
-            macAddress = macAddress,
-            deviceName = deviceName,
-            rssi = rssi,
-            serviceUuids = serviceUuids,
-            manufacturerData = manufacturerData,
-            advertisingRate = advertisingRate,
-            timestamp = System.currentTimeMillis(),
-            latitude = currentLocation?.latitude,
-            longitude = currentLocation?.longitude
-        )
-
-        // Delegate to the handler
-        return bleDetectionHandler.handleDetection(context)
+    private fun handleDatabaseShutdown() {
+        isDatabaseAvailable.value = false
+        closeDatabaseConnection()
     }
 
-    /**
-     * Process WiFi scan results using the RogueWifiMonitor and RfSignalAnalyzer.
-     *
-     * This method handles the legacy RogueWifiMonitor integration for advanced
-     * detection (evil twins, deauth attacks, following networks). The primary
-     * SSID/MAC pattern matching is now handled by WifiDetectionHandler.processData()
-     * which is called separately in processWifiScanResults().
-     *
-     * @param scanResults The list of WiFi scan results
-     */
-    private fun processWifiWithHandler(scanResults: List<android.net.wifi.ScanResult>) {
-        // Feed results to Rogue WiFi Monitor for evil twin/rogue AP detection
-        // Note: WifiDetectionHandler now also integrates with RogueWifiMonitor
-        // but we keep this for backward compatibility with existing rogueWifiMonitor instance
-        rogueWifiMonitor?.processScanResults(scanResults)
-
-        // Feed results to RF Signal Analyzer for spectrum analysis (only if RF detection enabled)
-        if (currentDetectionSettings?.enableRfDetection == true) {
-            rfSignalAnalyzer?.analyzeWifiScan(scanResults)
-        }
-    }
-
-    /**
-     * Process a cellular anomaly using the CellularDetectionHandler.
-     *
-     * Converts the CellularAnomaly to a detection using the handler's
-     * analysis logic and settings-based filtering.
-     *
-     * @param anomaly The cellular anomaly from CellularMonitor
-     * @return Detection if the anomaly warrants a detection, null otherwise
-     */
-    private suspend fun processCellularWithHandler(
-        anomaly: CellularMonitor.CellularAnomaly
-    ): Detection? {
-        return cellularDetectionHandler.convertAnomalyToDetection(anomaly)
-    }
-
-    /**
-     * Process a satellite anomaly using the SatelliteDetectionHandler.
-     *
-     * Converts the SatelliteAnomaly to a detection with appropriate threat
-     * levels and NTN-specific analysis.
-     *
-     * @param anomaly The satellite anomaly from SatelliteMonitor
-     * @param connectionState Current satellite connection state
-     * @return Detection if the anomaly meets severity thresholds, null otherwise
-     */
-    private suspend fun processSatelliteWithHandler(
-        anomaly: com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly,
-        connectionState: com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState
-    ): Detection? {
-        return satelliteDetectionHandler.handleAnomaly(
-            anomaly = anomaly,
-            connectionState = connectionState,
-            latitude = currentLocation?.latitude,
-            longitude = currentLocation?.longitude
-        )
-    }
-
-    /**
-     * Insert a detection and trigger immediate LLM analysis.
-     * This ensures detections are enriched as they come in rather than waiting for batch processing.
-     */
-    private suspend fun insertDetectionWithAnalysis(detection: Detection) {
-        repository.insertDetection(detection)
-
-        // Trigger immediate LLM analysis for this detection
+    private fun closeDatabaseConnection() {
         try {
-            BackgroundAnalysisWorker.triggerForDetections(
-                this@ScanningService,
-                listOf(detection.id)
-            )
-            if (BuildConfig.DEBUG) {
-                Log.d(TAG, "Triggered immediate LLM analysis for detection: ${detection.id}")
-            }
+            com.flockyou.data.repository.FlockYouDatabase.getDatabase(applicationContext).close()
+            Log.d(TAG, "Database connection closed")
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to trigger immediate LLM analysis: ${e.message}")
+            Log.e(TAG, "Error closing database connection", e)
         }
     }
 
-    private fun alertUser(detection: Detection) {
-        val notifSettings = currentNotificationSettings
+    // ==================== Battery Monitoring ====================
 
-        // Check if we should show emergency popup for CRITICAL threats
-        if (detection.threatLevel == ThreatLevel.CRITICAL &&
-            notifSettings.emergencyPopupEnabled &&
-            Settings.canDrawOverlays(this)
-        ) {
-            showEmergencyPopup(detection)
-            // Emergency popup handles its own sound and vibration, skip regular alert
-            sendDetectionBroadcast(detection)
-            return
+    private fun registerBatteryReceiver() {
+        if (batteryReceiver != null) return
+
+        batteryReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                intent?.let { updateBatteryState(it) }
+            }
         }
 
-        // Vibrate based on threat level
-        val pattern = when (detection.threatLevel) {
-            ThreatLevel.CRITICAL -> longArrayOf(0, 200, 100, 200, 100, 200)
-            ThreatLevel.HIGH -> longArrayOf(0, 150, 100, 150, 100, 150)
-            ThreatLevel.MEDIUM -> longArrayOf(0, 100, 100, 100)
-            else -> longArrayOf(0, 100, 100)
+        val intentFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_BATTERY_CHANGED)
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
+        val batteryStatus = registerReceiver(batteryReceiver, intentFilter)
+        batteryStatus?.let { updateBatteryState(it) }
+
+        Log.d(TAG, "Battery receiver registered, initial level: $currentBatteryPercent%, charging: $isCharging")
+    }
+
+    private fun unregisterBatteryReceiver() {
+        batteryReceiver?.let {
+            try {
+                unregisterReceiver(it)
+                Log.d(TAG, "Battery receiver unregistered")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error unregistering battery receiver", e)
+            }
+        }
+        batteryReceiver = null
+    }
+
+    private fun updateBatteryState(intent: Intent) {
+        val level = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
+        val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+
+        if (level >= 0 && scale > 0) {
+            currentBatteryPercent = (level * 100) / scale
+            currentBatteryLevel.value = currentBatteryPercent
+        }
+
+        isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
+                     status == android.os.BatteryManager.BATTERY_STATUS_FULL
+        isBatteryCharging.value = isCharging
+
+        updateEffectiveBatteryMode()
+    }
+
+    private fun updateEffectiveBatteryMode() {
+        val effectiveMode = if (isCharging) {
+            com.flockyou.data.BatteryAdaptiveMode.PERFORMANCE
         } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(pattern, -1)
+            currentScanSettings.getEffectiveMode(currentBatteryPercent)
         }
 
-        // Send notification
-        sendDetectionNotification(detection)
-
-        // Send broadcast for automation apps
-        sendDetectionBroadcast(detection)
-    }
-
-    /**
-     * Shows a full-screen CMAS/WEA-style emergency alert popup for critical threats.
-     * This displays above the lock screen and plays an alarm sound.
-     */
-    private fun showEmergencyPopup(detection: Detection) {
-        Log.w(TAG, "Showing emergency popup for CRITICAL detection: ${detection.deviceType}")
-
-        val notifSettings = currentNotificationSettings
-
-        val title = "SURVEILLANCE ALERT"
-        val message = buildString {
-            append("A ")
-            append(detection.deviceType.name.replace("_", " "))
-            append(" has been detected in your vicinity.\n\n")
-            if (!detection.deviceName.isNullOrBlank()) {
-                append("Device: ${detection.deviceName}\n")
-            }
-            if (!detection.ssid.isNullOrBlank()) {
-                append("Network: ${detection.ssid}\n")
-            }
-            append("\nTake appropriate security measures.")
+        if (currentBatteryMode.value != effectiveMode) {
+            Log.d(TAG, "Battery mode changed: ${currentBatteryMode.value} -> $effectiveMode " +
+                    "(battery: $currentBatteryPercent%, charging: $isCharging)")
+            currentBatteryMode.value = effectiveMode
+            broadcastBatteryState()
         }
-
-        val intent = EmergencyAlertActivity.createIntent(
-            context = this,
-            title = title,
-            message = message,
-            deviceType = detection.deviceType.name.replace("_", " "),
-            threatLevel = detection.threatLevel,
-            detectionId = detection.id,
-            playSound = notifSettings.sound,
-            vibrate = notifSettings.vibrate
-        )
-
-        startActivity(intent)
     }
 
-    private fun sendSatelliteConnectionNotification(state: com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState) {
-        val providerName = when (state.provider) {
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.STARLINK -> "Starlink"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.SKYLO -> "Skylo"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.GLOBALSTAR -> "Globalstar"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.AST_SPACEMOBILE -> "AST SpaceMobile"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.LYNK -> "Lynk"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.IRIDIUM -> "Iridium"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.INMARSAT -> "Inmarsat"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.UNKNOWN -> state.networkName ?: "Unknown"
-        }
-        val connectionTypeName = when (state.connectionType) {
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.T_MOBILE_STARLINK -> "T-Mobile Satellite"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.SKYLO_NTN -> "Skylo NTN"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.GENERIC_NTN -> "NTN"
-            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.PROPRIETARY -> "Proprietary Satellite"
-            else -> "Satellite"
-        }
-
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Satellite Connection Active")
-            .setContentText("Connected to $providerName via $connectionTypeName")
-            .setSmallIcon(R.drawable.ic_radar)
-            .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setOngoing(true)
-            .build()
-
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(SATELLITE_CONNECTION_NOTIF_ID, notification)
-    }
-
-    private fun cancelSatelliteConnectionNotification() {
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.cancel(SATELLITE_CONNECTION_NOTIF_ID)
-    }
-
-    private fun sendDetectionNotification(detection: Detection) {
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("⚠️ Surveillance Device Detected!")
-            .setContentText("${detection.deviceType.name.replace("_", " ")} - ${detection.threatLevel}")
-            .setSmallIcon(R.drawable.ic_warning)
-            .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .build()
-        
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(detection.id.hashCode(), notification)
-    }
-
-    // ==================== Automation Broadcasts ====================
-
-    /**
-     * Send a broadcast for a detection event to automation apps (Tasker, Automate, etc.)
-     */
-    private fun sendDetectionBroadcast(detection: Detection) {
-        val settings = currentBroadcastSettings
-        if (!settings.enabled || !settings.broadcastOnDetection) return
-
-        // Check minimum threat level
-        if (!meetsMinThreatLevel(detection.threatLevel, settings.minThreatLevel)) return
-
-        val intent = Intent(com.flockyou.data.BroadcastSettings.ACTION_DETECTION).apply {
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_DETECTION_ID, detection.id)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_DEVICE_TYPE, detection.deviceType.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_DEVICE_NAME, detection.deviceName)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_MAC_ADDRESS, detection.macAddress)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_SSID, detection.ssid)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, detection.threatLevel.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_SCORE, detection.threatScore)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_PROTOCOL, detection.protocol.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_DETECTION_METHOD, detection.detectionMethod.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_SIGNAL_STRENGTH, detection.signalStrength.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_RSSI, detection.rssi)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, detection.timestamp)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_MANUFACTURER, detection.manufacturer)
-
-            if (settings.includeLocation) {
-                detection.latitude?.let { putExtra(com.flockyou.data.BroadcastSettings.EXTRA_LATITUDE, it) }
-                detection.longitude?.let { putExtra(com.flockyou.data.BroadcastSettings.EXTRA_LONGITUDE, it) }
-            }
-
-            // Allow explicit receivers
-            setPackage(null)
-        }
-
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcast sent: ${com.flockyou.data.BroadcastSettings.ACTION_DETECTION} for ${detection.deviceType}")
-    }
-
-    /**
-     * Send a broadcast for cellular anomaly events
-     */
-    fun sendCellularAnomalyBroadcast(anomaly: CellularMonitor.CellularAnomaly) {
-        val settings = currentBroadcastSettings
-        if (!settings.enabled || !settings.broadcastOnCellularAnomaly) return
-
-        val intent = Intent(com.flockyou.data.BroadcastSettings.ACTION_CELLULAR_ANOMALY).apply {
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_TYPE, anomaly.type.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_DESCRIPTION, anomaly.description)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, anomaly.severity.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, anomaly.timestamp)
-            setPackage(null)
-        }
-
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcast sent: ${com.flockyou.data.BroadcastSettings.ACTION_CELLULAR_ANOMALY}")
-    }
-
-    /**
-     * Send a broadcast for satellite anomaly events
-     */
-    fun sendSatelliteAnomalyBroadcast(anomaly: com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly) {
-        val settings = currentBroadcastSettings
-        if (!settings.enabled || !settings.broadcastOnSatelliteAnomaly) return
-
-        val intent = Intent(com.flockyou.data.BroadcastSettings.ACTION_SATELLITE_ANOMALY).apply {
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_TYPE, anomaly.type.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_DESCRIPTION, anomaly.description)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, anomaly.severity.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, anomaly.timestamp)
-            setPackage(null)
-        }
-
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcast sent: ${com.flockyou.data.BroadcastSettings.ACTION_SATELLITE_ANOMALY}")
-    }
-
-    /**
-     * Send a broadcast for WiFi anomaly events
-     */
-    fun sendWifiAnomalyBroadcast(anomaly: RogueWifiMonitor.WifiAnomaly) {
-        val settings = currentBroadcastSettings
-        if (!settings.enabled || !settings.broadcastOnWifiAnomaly) return
-
-        val intent = Intent(com.flockyou.data.BroadcastSettings.ACTION_WIFI_ANOMALY).apply {
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_TYPE, anomaly.type.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_DESCRIPTION, anomaly.description)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, anomaly.severity.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, anomaly.timestamp)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_SSID, anomaly.ssid)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_MAC_ADDRESS, anomaly.bssid)
-            setPackage(null)
-        }
-
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcast sent: ${com.flockyou.data.BroadcastSettings.ACTION_WIFI_ANOMALY}")
-    }
-
-    /**
-     * Send a broadcast for RF anomaly events
-     */
-    fun sendRfAnomalyBroadcast(anomaly: RfSignalAnalyzer.RfAnomaly) {
-        val settings = currentBroadcastSettings
-        if (!settings.enabled || !settings.broadcastOnRfAnomaly) return
-
-        val intent = Intent(com.flockyou.data.BroadcastSettings.ACTION_RF_ANOMALY).apply {
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_TYPE, anomaly.type.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_DESCRIPTION, anomaly.description)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, anomaly.severity.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, anomaly.timestamp)
-            setPackage(null)
-        }
-
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcast sent: ${com.flockyou.data.BroadcastSettings.ACTION_RF_ANOMALY}")
-    }
-
-    /**
-     * Send a broadcast for ultrasonic anomaly events
-     */
-    fun sendUltrasonicAnomalyBroadcast(anomaly: UltrasonicDetector.UltrasonicAnomaly) {
-        val settings = currentBroadcastSettings
-        if (!settings.enabled || !settings.broadcastOnUltrasonic) return
-
-        val intent = Intent(com.flockyou.data.BroadcastSettings.ACTION_ULTRASONIC).apply {
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_TYPE, anomaly.type.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_DESCRIPTION, anomaly.description)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, anomaly.severity.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, anomaly.timestamp)
-            setPackage(null)
-        }
-
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcast sent: ${com.flockyou.data.BroadcastSettings.ACTION_ULTRASONIC}")
-    }
-
-    /**
-     * Send a broadcast for GNSS anomaly events (spoofing/jamming detection)
-     */
-    fun sendGnssAnomalyBroadcast(anomaly: com.flockyou.monitoring.GnssSatelliteMonitor.GnssAnomaly) {
-        val settings = currentBroadcastSettings
-        if (!settings.enabled || !settings.broadcastOnGnssAnomaly) return
-
-        val intent = Intent(com.flockyou.data.BroadcastSettings.ACTION_GNSS_ANOMALY).apply {
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_TYPE, anomaly.type.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_DESCRIPTION, anomaly.description)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, anomaly.severity.name)
-            putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, anomaly.timestamp)
-            putExtra("technical_details", anomaly.technicalDetails)
-            putExtra("affected_constellations", anomaly.affectedConstellations.joinToString(",") { it.code })
-            putExtra("confidence", anomaly.confidence.name)
-            if (settings.includeLocation) {
-                anomaly.latitude?.let { putExtra(com.flockyou.data.BroadcastSettings.EXTRA_LATITUDE, it) }
-                anomaly.longitude?.let { putExtra(com.flockyou.data.BroadcastSettings.EXTRA_LONGITUDE, it) }
-            }
-            setPackage(null)
-        }
-
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcast sent: ${com.flockyou.data.BroadcastSettings.ACTION_GNSS_ANOMALY}")
-    }
-
-    /**
-     * Check if a threat level meets the minimum threshold
-     */
-    private fun meetsMinThreatLevel(actual: ThreatLevel, minimum: String): Boolean {
-        val levels = listOf("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL")
-        val actualIndex = levels.indexOf(actual.name)
-        val minIndex = levels.indexOf(minimum)
-        return actualIndex >= minIndex
+    private fun getBatteryMultipliers(): Pair<Float, Float> {
+        val mode = currentBatteryMode.value
+        return Pair(mode.intervalMultiplier, mode.durationMultiplier)
     }
 
     // ==================== Location ====================
-    
+
     @SuppressLint("MissingPermission")
     private fun updateLocation() {
         if (!hasLocationPermissions()) {
             locationStatus.value = SubsystemStatus.PermissionDenied("ACCESS_FINE_LOCATION")
             return
         }
-        
+
         fusedLocationClient.lastLocation
             .addOnSuccessListener { location ->
                 currentLocation = location
@@ -4238,29 +1868,9 @@ class ScanningService : Service() {
                 logError("Location", -1, "Failed to get location: ${e.message}", recoverable = true)
             }
     }
-    
-    // ==================== Permissions ====================
-    
-    private fun hasBluetoothPermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-    
-    private fun hasLocationPermissions(): Boolean {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-    }
 
     // ==================== Detector Health Management ====================
 
-    /**
-     * Start the periodic health check job that monitors detector health
-     * and attempts to restart stalled detectors.
-     */
     private fun startHealthCheckJob() {
         healthCheckJob?.cancel()
         healthCheckJob = serviceScope.launch {
@@ -4272,44 +1882,29 @@ class ScanningService : Service() {
         Log.d(TAG, "Health check job started")
     }
 
-    /**
-     * Stop the health check job.
-     */
     private fun stopHealthCheckJob() {
         healthCheckJob?.cancel()
         healthCheckJob = null
         Log.d(TAG, "Health check job stopped")
     }
 
-    /**
-     * Start the periodic throttle cache cleanup job.
-     * Cleans up stale entries from the deduplicator every 30 seconds.
-     */
     private fun startThrottleCleanup() {
         throttleCleanupJob?.cancel()
         throttleCleanupJob = serviceScope.launch {
             while (isActive) {
-                delay(30_000)  // Every 30 seconds
+                delay(30_000)
                 deduplicator.cleanup()
             }
         }
         Log.d(TAG, "Throttle cleanup job started")
     }
 
-    /**
-     * Stop the throttle cache cleanup job.
-     */
     private fun stopThrottleCleanup() {
         throttleCleanupJob?.cancel()
         throttleCleanupJob = null
         Log.d(TAG, "Throttle cleanup job stopped")
     }
 
-    /**
-     * Start periodic IPC refresh job.
-     * Broadcasts all subsystem data to connected clients every few seconds.
-     * This ensures the UI stays updated even when no events are occurring.
-     */
     private fun startIpcRefreshJob() {
         ipcRefreshJob?.cancel()
         ipcRefreshJob = serviceScope.launch {
@@ -4323,29 +1918,20 @@ class ScanningService : Service() {
         Log.d(TAG, "IPC refresh job started")
     }
 
-    /**
-     * Stop the IPC refresh job.
-     */
     private fun stopIpcRefreshJob() {
         ipcRefreshJob?.cancel()
         ipcRefreshJob = null
         Log.d(TAG, "IPC refresh job stopped")
     }
 
-    /**
-     * Start the periodic cross-domain correlation analysis job.
-     * This runs every 60 seconds to analyze recent detections for coordinated surveillance patterns.
-     */
     private fun startCorrelationAnalysisJob() {
         correlationAnalysisJob?.cancel()
         correlationAnalysisJob = serviceScope.launch {
-            // Wait a bit before first analysis to allow detections to accumulate
             delay(CORRELATION_ANALYSIS_INTERVAL_MS)
 
             while (isActive && isScanning.value) {
                 try {
-                    // Get recent detections from repository
-                    val sinceTimestamp = System.currentTimeMillis() - 10 * 60 * 1000L // Last 10 minutes
+                    val sinceTimestamp = System.currentTimeMillis() - 10 * 60 * 1000L
                     val recentDetections = if (currentPrivacySettings.ephemeralModeEnabled) {
                         ephemeralRepository.getRecentDetections(sinceTimestamp).first()
                     } else {
@@ -4357,27 +1943,24 @@ class ScanningService : Service() {
 
                         val result = crossDomainAnalyzer.analyzeCorrelations(
                             recentDetections = recentDetections,
-                            timeWindowMs = 10 * 60 * 1000L // 10 minute window
+                            timeWindowMs = 10 * 60 * 1000L
                         )
 
                         if (result.correlatedThreats.isNotEmpty()) {
                             Log.i(TAG, "Correlation analysis found ${result.correlatedThreats.size} correlated threats")
 
-                            // Alert user for critical correlations
                             result.mostCriticalCorrelation?.let { critical ->
                                 if (critical.combinedThreatLevel == ThreatLevel.CRITICAL) {
                                     alertUserOfCorrelation(critical)
                                 }
                             }
 
-                            // Broadcast correlation results to UI
                             broadcastCorrelationResults(result)
                         } else {
                             Log.d(TAG, "No cross-domain correlations detected")
                         }
                     }
 
-                    // Cleanup old data in correlation analyzer
                     crossDomainAnalyzer.cleanup()
 
                 } catch (e: Exception) {
@@ -4390,116 +1973,10 @@ class ScanningService : Service() {
         Log.d(TAG, "Correlation analysis job started (interval: ${CORRELATION_ANALYSIS_INTERVAL_MS}ms)")
     }
 
-    /**
-     * Stop the correlation analysis job.
-     */
     private fun stopCorrelationAnalysisJob() {
         correlationAnalysisJob?.cancel()
         correlationAnalysisJob = null
         Log.d(TAG, "Correlation analysis job stopped")
-    }
-
-    /**
-     * Alert user of a critical correlated threat.
-     */
-    private fun alertUserOfCorrelation(correlation: com.flockyou.ai.correlation.CorrelatedThreat) {
-        // Create an alert notification for critical correlations
-        if (!currentNotificationSettings.enabled || !currentNotificationSettings.criticalAlertsEnabled) return
-
-        try {
-            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-
-            // Create high-priority alert channel if needed
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val alertChannel = NotificationChannel(
-                    "flockyou_correlation_alert",
-                    "Correlation Alerts",
-                    NotificationManager.IMPORTANCE_HIGH
-                ).apply {
-                    description = "Critical cross-domain surveillance correlation alerts"
-                    enableVibration(true)
-                    vibrationPattern = longArrayOf(0, 500, 200, 500)
-                }
-                notificationManager.createNotificationChannel(alertChannel)
-            }
-
-            val intent = Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra("correlation_id", correlation.id)
-            }
-            val pendingIntent = PendingIntent.getActivity(
-                this, correlation.hashCode(), intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            val notification = NotificationCompat.Builder(this, "flockyou_correlation_alert")
-                .setSmallIcon(R.drawable.ic_warning)
-                .setContentTitle("CRITICAL: ${correlation.correlationType.displayName}")
-                .setContentText(correlation.primaryThreatIndicator)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(
-                    "${correlation.primaryThreatIndicator}\n\n" +
-                    "Domains: ${correlation.involvedDomains.joinToString(", ")}\n" +
-                    "Confidence: ${(correlation.correlationScore * 100).toInt()}%\n\n" +
-                    "Tap for details and recommendations."
-                ))
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setAutoCancel(true)
-                .setContentIntent(pendingIntent)
-                .setVibrate(longArrayOf(0, 500, 200, 500))
-                .build()
-
-            notificationManager.notify(correlation.id.hashCode(), notification)
-            Log.i(TAG, "Sent correlation alert notification: ${correlation.correlationType.displayName}")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send correlation alert: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Broadcast correlation analysis results to connected IPC clients.
-     */
-    private fun broadcastCorrelationResults(result: com.flockyou.ai.correlation.CorrelationAnalysisResult) {
-        if (ipcClients.isEmpty()) return
-
-        try {
-            broadcastToClients {
-                android.os.Message.obtain(null, ScanningServiceIpc.MSG_CORRELATION_RESULTS).apply {
-                    data = android.os.Bundle().apply {
-                        putInt("correlation_count", result.correlatedThreats.size)
-                        putString("summary", result.summary)
-                        putBoolean("has_critical", result.hasCriticalCorrelations)
-                        putString("highest_threat", result.highestThreatLevel?.displayName)
-                        putLong("timestamp", result.analysisTimestamp)
-                        // Serialize correlation types found
-                        val types = result.correlationsByType.entries.map { "${it.key.name}:${it.value}" }
-                        putStringArrayList("correlation_types", ArrayList(types))
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to broadcast correlation results: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Broadcast all subsystem data to connected IPC clients.
-     * Called periodically to ensure UI stays up-to-date.
-     */
-    private fun broadcastAllSubsystemData() {
-        broadcastStateToClients()
-        broadcastDetectorHealth()
-        broadcastScanStats()
-        broadcastSubsystemStatus()
-        broadcastSeenBleDevices()
-        broadcastSeenWifiNetworks()
-        broadcastCellularData()
-        broadcastSatelliteData()
-        broadcastRogueWifiData()
-        broadcastRfData()
-        broadcastUltrasonicData()
-        broadcastGnssData()
-        broadcastThreadingData()
     }
 
     /**
@@ -4512,18 +1989,15 @@ class ScanningService : Service() {
         for ((detectorName, status) in currentHealth) {
             if (!status.isRunning) continue
 
-            // Check if detector has gone stale (no successful scan in threshold time)
             val lastSuccess = status.lastSuccessfulScan
             if (lastSuccess != null && (now - lastSuccess) > DETECTOR_STALE_THRESHOLD_MS) {
                 Log.w(TAG, "Detector $detectorName appears stalled (no scan in ${(now - lastSuccess) / 1000}s)")
 
-                // Mark as unhealthy
                 currentHealth[detectorName] = status.copy(
                     isHealthy = false,
                     consecutiveFailures = status.consecutiveFailures + 1
                 )
 
-                // Attempt restart if we haven't exceeded max attempts
                 if (status.restartCount < MAX_RESTART_ATTEMPTS) {
                     attemptDetectorRestart(detectorName)
                 } else {
@@ -4533,19 +2007,17 @@ class ScanningService : Service() {
             }
         }
 
-        // Additional BLE-specific checks for stall detection and automatic restart
+        // Additional BLE-specific checks
         val bleHealthStatus = currentHealth[DetectorHealthStatus.DETECTOR_BLE]
         if (bleHealthStatus != null && bleHealthStatus.isRunning) {
             var needsRestart = false
             var reason = ""
 
-            // Check 1: isBleScanningActive flag should be true
             if (!isBleScanningActive) {
                 needsRestart = true
                 reason = "isBleScanningActive=false but scanner should be running"
             }
 
-            // Check 2: BLE watchdog - no scan results received for too long
             if (!needsRestart && isBleScanningActive && lastBleScanResultTime > 0) {
                 val timeSinceLastResult = now - lastBleScanResultTime
                 if (timeSinceLastResult > BLE_WATCHDOG_THRESHOLD_MS) {
@@ -4575,22 +2047,15 @@ class ScanningService : Service() {
         broadcastDetectorHealth()
 
         // === CRITICAL JOB WATCHDOG ===
-        // Monitor and restart critical background jobs if they've stopped unexpectedly
         checkAndRestartCriticalJobs()
     }
 
-    /**
-     * Check and restart critical background jobs that may have stopped unexpectedly.
-     * This ensures the scanning service remains functional even if coroutines fail silently.
-     */
     private fun checkAndRestartCriticalJobs() {
-        // Check main scan job
         if (isScanning.value && (scanJob == null || scanJob?.isActive != true)) {
             Log.w(TAG, "WATCHDOG: Main scan job stopped unexpectedly, restarting...")
             restartScanningLoopIfNeeded()
         }
 
-        // Check cellular monitoring jobs if cellular monitor is active
         if (cellularMonitor != null) {
             if (cellularAnomalyJob == null || cellularAnomalyJob?.isActive != true) {
                 Log.w(TAG, "WATCHDOG: Cellular anomaly job stopped, restarting...")
@@ -4598,35 +2063,28 @@ class ScanningService : Service() {
             }
         }
 
-        // Check settings collection jobs - these are critical for responding to settings changes
         if (broadcastSettingsJob == null || broadcastSettingsJob?.isActive != true) {
             Log.w(TAG, "WATCHDOG: Broadcast settings job stopped, restarting...")
             restartSettingsCollectionJobs()
         }
 
-        // Check IPC refresh job - ensures UI stays updated
         if (ipcRefreshJob == null || ipcRefreshJob?.isActive != true) {
             Log.w(TAG, "WATCHDOG: IPC refresh job stopped, restarting...")
             startIpcRefreshJob()
         }
 
-        // Check throttle cleanup job
         if (throttleCleanupJob == null || throttleCleanupJob?.isActive != true) {
             Log.w(TAG, "WATCHDOG: Throttle cleanup job stopped, restarting...")
             startThrottleCleanup()
         }
     }
 
-    /**
-     * Restart cellular monitoring collection jobs.
-     */
     private fun restartCellularMonitoringJobs() {
         cellularAnomalyJob?.cancel()
         cellularStatusJob?.cancel()
         cellularHistoryJob?.cancel()
         cellularEventsJob?.cancel()
 
-        // Restart the cellular monitoring setup
         try {
             startCellularMonitoring()
             Log.i(TAG, "Cellular monitoring jobs restarted")
@@ -4635,9 +2093,6 @@ class ScanningService : Service() {
         }
     }
 
-    /**
-     * Restart settings collection jobs.
-     */
     private fun restartSettingsCollectionJobs() {
         broadcastSettingsJob?.cancel()
         privacySettingsJob?.cancel()
@@ -4645,7 +2100,6 @@ class ScanningService : Service() {
         notificationSettingsJob?.cancel()
         detectionSettingsJob?.cancel()
 
-        // Restart settings collection - inline the setup
         try {
             broadcastSettingsJob = serviceScope.launch {
                 broadcastSettingsRepository.settings.collect { settings ->
@@ -4683,40 +2137,28 @@ class ScanningService : Service() {
         }
     }
 
-    /**
-     * Restart the main scanning loop if it has stopped.
-     * This is a lightweight restart that only reinitializes the scan job.
-     */
     private fun restartScanningLoopIfNeeded() {
         if (!isScanning.value) {
             Log.d(TAG, "Scanning is stopped, not restarting loop")
             return
         }
 
-        // Stop and restart scanning components
         Log.i(TAG, "Restarting scanning loop via full restart...")
 
-        // Cancel existing scan job
         scanJob?.cancel()
         scanJob = null
 
-        // Stop BLE scan if active
         if (isBleScanningActive) {
             stopBleScan()
         }
 
-        // Re-trigger startScanning which will reinitialize everything
-        // Use a flag to avoid recursion
         isScanning.value = false
         serviceScope.launch {
-            delay(1000) // Brief delay before restart
+            delay(1000)
             startScanning()
         }
     }
 
-    /**
-     * Handle an error from a detector.
-     */
     private fun handleDetectorError(detectorName: String, error: String, recoverable: Boolean) {
         Log.e(TAG, "Detector error [$detectorName]: $error (recoverable=$recoverable)")
 
@@ -4730,15 +2172,12 @@ class ScanningService : Service() {
             )
         }
 
-        // Log to error log
         logError(detectorName, -1, error, recoverable)
 
-        // Attempt restart if recoverable and not exceeded max failures
         val currentStatus = detectorHealth.value[detectorName]
         if (recoverable && currentStatus != null &&
             currentStatus.consecutiveFailures < MAX_CONSECUTIVE_FAILURES &&
             currentStatus.restartCount < MAX_RESTART_ATTEMPTS) {
-            // Use exponential backoff for restart delay
             val delayMs = (1000L * (1 shl currentStatus.consecutiveFailures.coerceAtMost(4))).coerceAtMost(30_000L)
             serviceScope.launch {
                 delay(delayMs)
@@ -4749,9 +2188,6 @@ class ScanningService : Service() {
         broadcastDetectorHealth()
     }
 
-    /**
-     * Handle a successful scan from a detector.
-     */
     private fun handleDetectorSuccess(detectorName: String) {
         updateDetectorHealth(detectorName) { current ->
             current.copy(
@@ -4763,9 +2199,6 @@ class ScanningService : Service() {
         broadcastDetectorHealth()
     }
 
-    /**
-     * Update detector health status with a transformation function.
-     */
     private fun updateDetectorHealth(detectorName: String, transform: (DetectorHealthStatus) -> DetectorHealthStatus) {
         val current = detectorHealth.value.toMutableMap()
         val existing = current[detectorName] ?: DetectorHealthStatus(name = detectorName)
@@ -4773,9 +2206,6 @@ class ScanningService : Service() {
         detectorHealth.value = current
     }
 
-    /**
-     * Initialize detector health tracking for all detectors.
-     */
     private fun initializeDetectorHealth() {
         val initialHealth = mapOf(
             DetectorHealthStatus.DETECTOR_BLE to DetectorHealthStatus(name = DetectorHealthStatus.DETECTOR_BLE),
@@ -4791,13 +2221,9 @@ class ScanningService : Service() {
         broadcastDetectorHealth()
     }
 
-    /**
-     * Attempt to restart a specific detector.
-     */
     private fun attemptDetectorRestart(detectorName: String) {
         Log.i(TAG, "Attempting to restart detector: $detectorName")
 
-        // Increment restart count
         updateDetectorHealth(detectorName) { current ->
             current.copy(restartCount = current.restartCount + 1)
         }
@@ -4867,7 +2293,6 @@ class ScanningService : Service() {
                 }
             }
             DetectorHealthStatus.DETECTOR_WIFI -> {
-                // WiFi scanning is triggered by system, just log
                 Log.i(TAG, "WiFi scanner restart requested (system-triggered)")
             }
         }
@@ -4875,24 +2300,10 @@ class ScanningService : Service() {
         broadcastDetectorHealth()
     }
 
-    /**
-     * Broadcast detector health status to all IPC clients.
-     */
-    private fun broadcastDetectorHealth() {
-        if (ipcClients.isEmpty()) return
-        val healthJson = ScanningServiceIpc.gson.toJson(detectorHealth.value)
-        broadcastToClients {
-            Message.obtain(null, ScanningServiceIpc.MSG_DETECTOR_HEALTH).apply {
-                data = Bundle().apply {
-                    putString(ScanningServiceIpc.KEY_DETECTOR_HEALTH_JSON, healthJson)
-                }
-            }
-        }
-    }
+    // ==================== Utility ====================
 
     /**
      * Format raw BLE data from ScanRecord for display in advanced mode.
-     * Combines manufacturer data and service data into a single hex string.
      */
     private fun formatRawBleData(
         scanRecord: android.bluetooth.le.ScanRecord?,
@@ -4902,19 +2313,16 @@ class ScanningService : Service() {
 
         val hexParts = mutableListOf<String>()
 
-        // Add manufacturer data (format: MFR_ID:DATA)
         manufacturerData.forEach { (id, data) ->
             hexParts.add("%04X".format(id) + data)
         }
 
-        // Add service data if available
         scanRecord?.serviceData?.forEach { (uuid, data) ->
             val uuidShort = uuid.uuid.toString().substring(4, 8).uppercase()
             val dataHex = data.joinToString("") { "%02X".format(it) }
             hexParts.add("SD:$uuidShort:$dataHex")
         }
 
-        // If no parsed data, include raw bytes
         if (hexParts.isEmpty()) {
             scanRecord?.bytes?.let { bytes ->
                 return bytes.joinToString("") { "%02X".format(it) }

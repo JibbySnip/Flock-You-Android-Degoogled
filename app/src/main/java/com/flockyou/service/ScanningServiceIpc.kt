@@ -359,11 +359,11 @@ class ScanningServiceConnection(private val context: Context) {
     val satelliteStatus: StateFlow<String> = _satelliteStatus.asStateFlow()
 
     // Seen devices (mirrored from service process)
-    private val _seenBleDevices = MutableStateFlow<List<ScanningService.SeenDevice>>(emptyList())
-    val seenBleDevices: StateFlow<List<ScanningService.SeenDevice>> = _seenBleDevices.asStateFlow()
+    private val _seenBleDevices = MutableStateFlow<List<SeenDevice>>(emptyList())
+    val seenBleDevices: StateFlow<List<SeenDevice>> = _seenBleDevices.asStateFlow()
 
-    private val _seenWifiNetworks = MutableStateFlow<List<ScanningService.SeenDevice>>(emptyList())
-    val seenWifiNetworks: StateFlow<List<ScanningService.SeenDevice>> = _seenWifiNetworks.asStateFlow()
+    private val _seenWifiNetworks = MutableStateFlow<List<SeenDevice>>(emptyList())
+    val seenWifiNetworks: StateFlow<List<SeenDevice>> = _seenWifiNetworks.asStateFlow()
 
     // Cellular monitoring data (mirrored from service process)
     private val _cellStatus = MutableStateFlow<CellularMonitor.CellStatus?>(null)
@@ -443,16 +443,16 @@ class ScanningServiceConnection(private val context: Context) {
     val gnssMeasurements: StateFlow<com.flockyou.monitoring.GnssSatelliteMonitor.GnssMeasurementData?> = _gnssMeasurements.asStateFlow()
 
     // Detector health status (mirrored from service process)
-    private val _detectorHealth = MutableStateFlow<Map<String, ScanningService.DetectorHealthStatus>>(emptyMap())
-    val detectorHealth: StateFlow<Map<String, ScanningService.DetectorHealthStatus>> = _detectorHealth.asStateFlow()
+    private val _detectorHealth = MutableStateFlow<Map<String, DetectorHealthStatus>>(emptyMap())
+    val detectorHealth: StateFlow<Map<String, DetectorHealthStatus>> = _detectorHealth.asStateFlow()
 
     // Error log (mirrored from service process)
-    private val _errorLog = MutableStateFlow<List<ScanningService.ScanError>>(emptyList())
-    val errorLog: StateFlow<List<ScanningService.ScanError>> = _errorLog.asStateFlow()
+    private val _errorLog = MutableStateFlow<List<ScanError>>(emptyList())
+    val errorLog: StateFlow<List<ScanError>> = _errorLog.asStateFlow()
 
     // Scan statistics (mirrored from service process)
-    private val _scanStats = MutableStateFlow(ScanningService.ScanStatistics())
-    val scanStats: StateFlow<ScanningService.ScanStatistics> = _scanStats.asStateFlow()
+    private val _scanStats = MutableStateFlow(ScanStatistics())
+    val scanStats: StateFlow<ScanStatistics> = _scanStats.asStateFlow()
 
     // Detection refresh event (notifies UI to refresh detections from database)
     private val _detectionRefreshEvent = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
@@ -893,8 +893,8 @@ class ScanningServiceConnection(private val context: Context) {
     internal fun updateSeenBleDevices(json: String?) {
         if (json == null) return
         try {
-            val type = object : TypeToken<List<ScanningService.SeenDevice>>() {}.type
-            val devices: List<ScanningService.SeenDevice> = ScanningServiceIpc.gson.fromJson(json, type)
+            val type = object : TypeToken<List<SeenDevice>>() {}.type
+            val devices: List<SeenDevice> = ScanningServiceIpc.gson.fromJson(json, type)
             _seenBleDevices.update { devices }
         } catch (e: Exception) {
             Log.e(tag, "Failed to parse seen BLE devices JSON", e)
@@ -904,8 +904,8 @@ class ScanningServiceConnection(private val context: Context) {
     internal fun updateSeenWifiNetworks(json: String?) {
         if (json == null) return
         try {
-            val type = object : TypeToken<List<ScanningService.SeenDevice>>() {}.type
-            val networks: List<ScanningService.SeenDevice> = ScanningServiceIpc.gson.fromJson(json, type)
+            val type = object : TypeToken<List<SeenDevice>>() {}.type
+            val networks: List<SeenDevice> = ScanningServiceIpc.gson.fromJson(json, type)
             _seenWifiNetworks.update { networks }
         } catch (e: Exception) {
             Log.e(tag, "Failed to parse seen WiFi networks JSON", e)
@@ -1113,8 +1113,8 @@ class ScanningServiceConnection(private val context: Context) {
         }
         try {
             Log.d(tag, "Received detector health JSON (${json.length} chars)")
-            val type = object : TypeToken<Map<String, ScanningService.DetectorHealthStatus>>() {}.type
-            val health: Map<String, ScanningService.DetectorHealthStatus> = ScanningServiceIpc.gson.fromJson(json, type)
+            val type = object : TypeToken<Map<String, DetectorHealthStatus>>() {}.type
+            val health: Map<String, DetectorHealthStatus> = ScanningServiceIpc.gson.fromJson(json, type)
             Log.d(tag, "Parsed detector health: ${health.size} detectors, running=${health.values.count { it.isRunning }}")
             Log.d(tag, "Current _detectorHealth value before update: ${_detectorHealth.value.size} detectors")
             _detectorHealth.update { health }
@@ -1127,8 +1127,8 @@ class ScanningServiceConnection(private val context: Context) {
     internal fun updateErrorLog(json: String?) {
         if (json == null) return
         try {
-            val type = object : TypeToken<List<ScanningService.ScanError>>() {}.type
-            val errors: List<ScanningService.ScanError> = ScanningServiceIpc.gson.fromJson(json, type)
+            val type = object : TypeToken<List<ScanError>>() {}.type
+            val errors: List<ScanError> = ScanningServiceIpc.gson.fromJson(json, type)
             _errorLog.update { errors }
         } catch (e: Exception) {
             Log.e(tag, "Failed to parse error log JSON", e)
@@ -1142,7 +1142,7 @@ class ScanningServiceConnection(private val context: Context) {
     internal fun updateScanStats(json: String?) {
         if (json == null) return
         try {
-            val stats: ScanningService.ScanStatistics = ScanningServiceIpc.gson.fromJson(json, ScanningService.ScanStatistics::class.java)
+            val stats: ScanStatistics = ScanningServiceIpc.gson.fromJson(json, ScanStatistics::class.java)
             _scanStats.update { stats }
         } catch (e: Exception) {
             Log.e(tag, "Failed to parse scan stats JSON", e)

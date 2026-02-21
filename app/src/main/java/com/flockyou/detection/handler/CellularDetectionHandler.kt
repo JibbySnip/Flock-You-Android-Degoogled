@@ -7,6 +7,7 @@ import com.flockyou.data.DetectionSettingsRepository
 import com.flockyou.data.model.Detection
 import com.flockyou.data.model.DetectionMethod
 import com.flockyou.data.model.DetectionProtocol
+import com.flockyou.detection.config.DetectionConstants
 import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.ThreatLevel
 import com.flockyou.data.model.rssiToSignalStrength
@@ -278,16 +279,11 @@ class CellularDetectionHandler @Inject constructor(
             |5. If immediate threat: enable airplane mode, use encrypted apps only
         """.trimMargin()
 
-        // IMSI catcher score thresholds - aligned with severity levels
-        // Score 90-100 = CRITICAL (immediate threat)
-        // Score 70-89 = HIGH (confirmed surveillance indicators)
-        // Score 50-69 = MEDIUM (likely surveillance equipment)
-        // Score 30-49 = LOW (possible, continue monitoring)
-        // Score 0-29 = INFO (notable but not threatening)
-        private const val IMSI_CRITICAL_THRESHOLD = 90
-        private const val IMSI_HIGH_THRESHOLD = 70
-        private const val IMSI_MEDIUM_THRESHOLD = 50
-        private const val IMSI_LOW_THRESHOLD = 30
+        // IMSI catcher score thresholds - centralized in DetectionConstants.Cellular
+        private const val IMSI_CRITICAL_THRESHOLD = DetectionConstants.Cellular.IMSI_CRITICAL_THRESHOLD
+        private const val IMSI_HIGH_THRESHOLD = DetectionConstants.Cellular.IMSI_HIGH_THRESHOLD
+        private const val IMSI_MEDIUM_THRESHOLD = DetectionConstants.Cellular.IMSI_MEDIUM_THRESHOLD
+        private const val IMSI_LOW_THRESHOLD = DetectionConstants.Cellular.IMSI_LOW_THRESHOLD
     }
 
     /**

@@ -225,7 +225,7 @@ import kotlin.math.abs
  */
 class GnssSatelliteMonitor(
     private val context: Context,
-    private val errorCallback: com.flockyou.service.ScanningService.DetectorCallback? = null
+    private val errorCallback: com.flockyou.service.DetectorCallback? = null
 ) {
 
     companion object {
@@ -718,11 +718,11 @@ class GnssSatelliteMonitor(
         try {
             registerGnssStatusCallback()
             registerGnssMeasurementsCallback()
-            errorCallback?.onDetectorStarted(com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_GNSS)
+            errorCallback?.onDetectorStarted(com.flockyou.service.DetectorHealthStatus.DETECTOR_GNSS)
         } catch (e: Exception) {
             Log.e(TAG, "Error starting GNSS monitoring", e)
             errorCallback?.onError(
-                com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_GNSS,
+                com.flockyou.service.DetectorHealthStatus.DETECTOR_GNSS,
                 "Failed to register GNSS callbacks: ${e.message}",
                 recoverable = true
             )
@@ -757,7 +757,7 @@ class GnssSatelliteMonitor(
             description = "Satellite data collection ended"
         )
 
-        errorCallback?.onDetectorStopped(com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_GNSS)
+        errorCallback?.onDetectorStopped(com.flockyou.service.DetectorHealthStatus.DETECTOR_GNSS)
     }
 
     fun updateLocation(latitude: Double, longitude: Double) {
@@ -948,7 +948,7 @@ class GnssSatelliteMonitor(
         runAnomalyDetection(satelliteList, envStatus)
 
         // Report successful scan
-        errorCallback?.onScanSuccess(com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_GNSS)
+        errorCallback?.onScanSuccess(com.flockyou.service.DetectorHealthStatus.DETECTOR_GNSS)
     }
 
     @RequiresApi(Build.VERSION_CODES.N)

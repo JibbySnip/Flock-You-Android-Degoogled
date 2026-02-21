@@ -8,7 +8,6 @@ import com.flockyou.data.model.*
 import com.flockyou.data.repository.DetectionRepository
 import com.flockyou.scanner.flipper.FlipperConnectionState
 import com.flockyou.scanner.flipper.FlipperScannerManager
-import com.flockyou.service.ScanningService
 import com.flockyou.service.ScanningServiceConnection
 import com.flockyou.ui.screens.MainViewModel
 import com.flockyou.utils.TestDataFactory
@@ -227,9 +226,9 @@ class StateUpdateIntegrationTest {
             val updatedState = expectMostRecentItem()
 
             assertTrue("Should be scanning", updatedState.isScanning)
-            assertEquals("Scan status should be Active", ScanningService.ScanStatus.Active, updatedState.scanStatus)
-            assertEquals("BLE status should be Scanning", ScanningService.SubsystemStatus.Scanning, updatedState.bleStatus)
-            assertEquals("WiFi status should be Scanning", ScanningService.SubsystemStatus.Scanning, updatedState.wifiStatus)
+            assertEquals("Scan status should be Active", com.flockyou.service.ScanStatus.Active, updatedState.scanStatus)
+            assertEquals("BLE status should be Scanning", com.flockyou.service.SubsystemStatus.Scanning, updatedState.bleStatus)
+            assertEquals("WiFi status should be Scanning", com.flockyou.service.SubsystemStatus.Scanning, updatedState.wifiStatus)
         }
     }
 

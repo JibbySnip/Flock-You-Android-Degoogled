@@ -1,6 +1,6 @@
 # Android as a Surveillance Detection Platform: Practicality, Feasibility, and Limitations
 
-A deep technical analysis of using stock Android devices to detect surveillance equipment, cyber attacks, and privacy threats -- what actually works, what doesn't, and why.
+A deep technical analysis of using Android devices -- from stock sideloaded apps to custom AOSP forks -- to detect surveillance equipment, cyber attacks, and privacy threats. What actually works, what doesn't, and what becomes possible when you control the entire OS stack.
 
 ---
 
@@ -17,13 +17,14 @@ A deep technical analysis of using stock Android devices to detect surveillance 
    - [RF Spectrum Analysis](#6-rf-spectrum-analysis)
    - [Satellite / Non-Terrestrial Network (NTN)](#7-satellite--non-terrestrial-network-ntn)
 4. [Cross-Protocol Correlation](#cross-protocol-correlation)
-5. [The Privilege Gap: Sideload vs System vs OEM](#the-privilege-gap)
+5. [The Privilege Gap: Sideload vs System vs OEM vs Custom OS](#the-privilege-gap)
 6. [False Positive Economics](#false-positive-economics)
 7. [Comparison with Prior Art](#comparison-with-prior-art)
 8. [What Android Gets Right](#what-android-gets-right)
-9. [Hard Limitations That Cannot Be Overcome](#hard-limitations-that-cannot-be-overcome)
-10. [The Honest Verdict](#the-honest-verdict)
-11. [References & Sources](#references--sources)
+9. [Hard Limitations](#hard-limitations)
+10. [Building a Surveillance Detection OS](#building-a-surveillance-detection-os)
+11. [The Honest Verdict](#the-honest-verdict)
+12. [References & Sources](#references--sources)
 
 ---
 
@@ -31,20 +32,24 @@ A deep technical analysis of using stock Android devices to detect surveillance 
 
 Android is a surprisingly capable -- but fundamentally constrained -- platform for surveillance detection. The BLE and WiFi radios expose rich advertisement and scan data that enables legitimate pattern-based detection of commercial surveillance equipment. Cellular APIs provide enough metadata to flag IMSI catcher indicators. GNSS raw measurements support academically-validated spoofing detection. But Android's security sandbox prevents access to raw radio frames, baseband modems, and RF spectrum data, making certain categories of detection impossible without root privileges or external hardware.
 
+**However, these constraints apply to stock Android.** When you build your own AOSP fork -- controlling the kernel, HALs, SELinux policy, and framework code -- many "impossible" detections become feasible. WiFi monitor mode, baseband diagnostic interfaces, raw HCI access, and removal of all scan throttling are all achievable with a custom OS. The baseband modem remains the one true black box.
+
 **The honest summary:**
 
-| Capability | Feasibility | Confidence |
-|---|---|---|
-| Detecting known surveillance devices by BLE/WiFi signatures | High | High |
-| Tracking BLE trackers following you across locations | High | Medium-High |
-| Detecting IMSI catchers via cellular anomalies | Medium | Medium |
-| Detecting GNSS spoofing via signal analysis | Medium | Medium (high FP rate) |
-| Detecting ultrasonic tracking beacons | Medium-Low | Medium |
-| Detecting WiFi deauth attacks | Low | Low (indirect only) |
-| RF spectrum analysis without external hardware | None | N/A |
-| Proving an IMSI catcher captured your identity | None (without OEM) | N/A |
+| Capability | Stock Sideload | Stock OEM | Custom OS | Confidence |
+|---|---|---|---|---|
+| Detecting known surveillance devices by BLE/WiFi signatures | High | High | High | High |
+| Tracking BLE trackers following you across locations | High | High | High | Medium-High |
+| Detecting IMSI catchers via cellular anomalies | Medium | Medium-High | High | Medium |
+| Detecting GNSS spoofing via signal analysis | Medium | Medium | High | Medium (high FP rate) |
+| Detecting ultrasonic tracking beacons | Medium-Low | Medium | Medium-High | Medium |
+| Detecting WiFi deauth attacks | Low (indirect) | Low (indirect) | **High (direct)** | High (custom OS) |
+| RF spectrum analysis without external hardware | None | None | Low (WiFi band only) | Low |
+| RF spectrum analysis with USB SDR hardware | Low (manual) | Low (manual) | **High (integrated)** | High |
+| Proving an IMSI catcher captured your identity | None | Medium | **High (Qualcomm)** | Medium-High |
+| Null cipher (A5/0) detection | None | None | **High (Qualcomm)** | High |
 
-The greatest strength of this approach is the sheer breadth of data Android *does* expose through its BLE and WiFi scanning APIs. The greatest weakness is the inability to access raw radio frames or baseband data, which means many detections are heuristic indicators rather than definitive proof.
+The greatest strength of this approach is the sheer breadth of data Android *does* expose through its BLE and WiFi scanning APIs. The greatest weakness on stock Android is the inability to access raw radio frames or baseband data, which means many detections are heuristic indicators rather than definitive proof. A custom OS fork can close many of these gaps -- but at the cost of maintaining an entire operating system.
 
 ---
 
@@ -71,6 +76,24 @@ The following are blocked by Android's SELinux mandatory access control, Linux D
 - **RF spectrum**: No API exists for wideband RF reception. The BLE, WiFi, and cellular radios are not exposed as software-defined radios.
 - **Other apps' radio data**: Sandboxing prevents observing other apps' Bluetooth connections or network traffic.
 - **Kernel-level sensor data**: No access to raw hardware interrupts, `/proc` entries for other processes, or system radio logs.
+
+### What a Custom OS Fork Unlocks
+
+The limitations above apply to apps running within Android's security model. When you build and sign your own AOSP fork, you become the platform -- and the security boundaries shift dramatically:
+
+**SELinux Policy Control**: You define the MAC (Mandatory Access Control) policy. Custom SELinux domains can grant processes access to `/dev/diag` (Qualcomm baseband diagnostic interface), `/dev/hci0` (raw Bluetooth HCI), and other device nodes that stock policy blocks. You can create purpose-built domains for surveillance detection daemons with precisely the access they need.
+
+**System/Root Execution**: Your detection code can run as UID 1000 (system) or UID 0 (root) with platform signing. This grants access to every Android permission, including `MODIFY_PHONE_STATE`, `READ_PRIVILEGED_PHONE_STATE`, `LOCAL_MAC_ADDRESS`, `PEERS_MAC_ADDRESS`, and hidden APIs. No permission prompts, no runtime grants -- the OS trusts itself.
+
+**Kernel Module Loading**: Custom kernel modules and eBPF programs can hook into the WiFi driver (e.g., `nl80211` management frame monitoring), add USB SDR device drivers, and implement kernel-level packet inspection. eBPF LSM (Linux Security Module) hooks can monitor system calls and network events with near-zero overhead.
+
+**HAL Modifications**: Hardware Abstraction Layer changes enable direct control over radio hardware. A modified GNSS HAL can force AGC (Automatic Gain Control) reporting on chipsets that suppress it. A modified WiFi HAL can enable monitor mode on supported chipsets. A modified Audio HAL can bypass DSP filters that attenuate ultrasonic frequencies.
+
+**Framework-Level Throttle Removal**: BLE scan throttling lives in `GattService.java`. WiFi scan throttling lives in `WifiScanningServiceImpl`. Both can be patched out entirely -- not bypassed via hidden APIs, but removed at the source. No duty cycling, no scan limits, continuous raw access.
+
+**No OEM Background Killing**: The [dontkillmyapp.com](https://dontkillmyapp.com) problem disappears entirely. You ARE the OEM. No aggressive battery optimization, no proprietary process killers, no vendor-specific restrictions. Your detection service runs with whatever priority and persistence you define.
+
+**Boot-Time Initialization**: Android 14's restriction on microphone foreground services starting from `BOOT_COMPLETED`? You wrote the OS -- the restriction doesn't apply to platform-signed system services. All detection subsystems can initialize at boot, including ultrasonic monitoring.
 
 ### Platform Throttling
 
@@ -150,9 +173,27 @@ A device that broadcasts infrequently might be missed during the 5-second cooldo
 
 **AirTag-specific detection is imprecise**. AirTags use Apple manufacturer data (0x004C), but so do AirPods, Apple Watches, MacBooks, and every other Apple device. AirTag-specific byte patterns (`isLikelyAirTag()`) help but are imperfect. Apple's Find My network protocol uses encrypted rotating identifiers specifically designed to resist third-party tracking -- which ironically makes detecting AirTags harder for a privacy app.
 
+#### With a Custom OS Fork
+
+A custom AOSP fork transforms BLE from "good" to "excellent":
+
+**Throttle elimination**: BLE scan throttling is enforced in `packages/apps/Bluetooth/src/com/android/bluetooth/gatt/GattService.java`. Patching out `numScansStopped` and the 5-scans-per-30-seconds check enables truly continuous scanning with zero cooldown periods. No device will be missed due to scan gaps.
+
+**Raw HCI access**: The Host Controller Interface (`/dev/hci0` or via `btsnoop_hci.log`) exposes raw Bluetooth packets before Android's BLE stack filters them. This enables:
+- Capturing advertisement packets that Android's `ScanRecord` parser drops or misinterprets
+- Observing connection-level events (pairing, GATT operations) between nearby devices
+- Multi-PHY scanning (1M, 2M, Coded PHY) simultaneously, catching devices that only advertise on extended advertising channels
+- Monitoring BLE direction-finding (AoA/AoD) on supported controllers
+
+**Real MAC addresses for all local interfaces**: Platform signing grants `LOCAL_MAC_ADDRESS`, eliminating the need for composite fingerprinting of the device's own addresses.
+
+**Extended advertising set monitoring**: Stock Android exposes limited extended advertising data. Raw HCI access captures the complete advertising train including all auxiliary packets, periodic advertising synchronization, and chained advertisement data that exceeds 31 bytes.
+
+**Background persistence**: The scanning service runs as a system service with `persistent=true` in the manifest, surviving all memory pressure events. Combined with `START_STICKY` and system-level restart policies, BLE monitoring becomes truly uninterruptible.
+
 #### Verdict
 
-BLE detection is the strongest pillar. The combination of rich advertisement data, well-documented device signatures, and proven tracker-following algorithms makes it the most practical surveillance detection protocol on Android. The primary risk is false positives from consumer devices that share manufacturer IDs or naming patterns with surveillance equipment.
+BLE detection is the strongest pillar. The combination of rich advertisement data, well-documented device signatures, and proven tracker-following algorithms makes it the most practical surveillance detection protocol on Android. The primary risk is false positives from consumer devices that share manufacturer IDs or naming patterns with surveillance equipment. A custom OS fork eliminates all scan throttling and adds raw HCI access, making BLE detection near-comprehensive.
 
 ---
 
@@ -191,9 +232,31 @@ The 4-scans-per-2-minutes limit (Android 9+) significantly constrains WiFi detec
 
 One mitigation: Android 10+ apps can passively receive scan results from system-initiated scans or other apps' scans via `SCAN_RESULTS_AVAILABLE_ACTION`, without counting against the throttle. This provides "free" scan data but at unpredictable intervals.
 
+#### With a Custom OS Fork
+
+A custom OS fork is **transformative** for WiFi detection -- it turns the weakest attack-detection protocol into one of the strongest:
+
+**WiFi monitor mode**: The single biggest unlock. Monitor mode enables capture of raw 802.11 management frames:
+- **Deauth detection**: Goes from "NOT feasible" to **fully feasible**. The OS can observe deauthentication and disassociation frames directly, counting attack frames, identifying the source MAC (often spoofed, but still useful for correlation), and alerting in real-time.
+- **Karma/Evil twin confirmation**: Probe request/response frames become visible. A Karma attack (rogue AP responding to all probe requests) can be detected definitively.
+- **WPA handshake capture detection**: The OS can observe EAPOL frames and detect when a nearby device is capturing WPA handshakes (PMKID attack, half-handshake capture).
+
+Implementation depends on the WiFi chipset:
+- **Broadcom/Cypress (BCM43xx)**: [Nexmon](https://nexmon.org/) provides a mature firmware patching framework. Proven on Samsung Galaxy S-series (Exynos variants) and Raspberry Pi. Enables full monitor mode + packet injection.
+- **Qualcomm (qcacld-3.0)**: The open-source `qcacld-3.0` WiFi driver supports monitor mode natively on many Qualcomm SoCs. Requires kernel config `CONFIG_WLAN_MONITOR_MODE=y` and appropriate firmware support. Pixels with Qualcomm WiFi (Pixel 3-5) or Samsung with Qualcomm WiFi are candidates.
+- **MediaTek**: Limited support. Some mt76-based chipsets support monitor mode in mainline Linux, but Android HAL integration is complex.
+
+**`nl80211` direct interface control**: The kernel's `nl80211` netlink interface allows creating virtual monitor interfaces (`iw phy0 interface add mon0 type monitor`) alongside the station interface. This enables simultaneous normal WiFi connectivity and passive monitoring -- the device stays connected to WiFi while also capturing management frames.
+
+**Packet injection**: On Nexmon-supported chipsets, packet injection enables active probing -- sending crafted probe requests to test if an AP exhibits Karma behavior, or injecting tagged frames for triangulation. This crosses into active reconnaissance territory and should be used carefully.
+
+**Scan throttle removal**: WiFi scan throttling in `WifiScanningServiceImpl` can be patched out entirely, enabling scans every 1-2 seconds instead of the stock 4-per-2-minutes limit.
+
+**Raw RSSI and CSI**: Some chipsets (Intel, Qualcomm with patched drivers) can expose Channel State Information (CSI), enabling passive radar-like detection of movement and presence through walls. This is research-grade capability but technically achievable on a custom OS.
+
 #### Verdict
 
-WiFi detection is strong for identifying known surveillance equipment by SSID/OUI patterns and detecting evil twin anomalies with extensive false positive filtering. It is weak for detecting active WiFi attacks (deauth, Karma, MITM) because Android does not expose raw 802.11 frames. The scan throttle is a meaningful constraint for sideloaded installs.
+WiFi detection is strong for identifying known surveillance equipment by SSID/OUI patterns and detecting evil twin anomalies with extensive false positive filtering. On stock Android, it is weak for detecting active WiFi attacks (deauth, Karma, MITM) because Android does not expose raw 802.11 frames. **A custom OS fork with monitor mode completely reverses this limitation**, making WiFi attack detection fully feasible on supported chipsets. The scan throttle is a meaningful constraint for sideloaded installs but is eliminated entirely on a custom OS.
 
 ---
 
@@ -260,9 +323,34 @@ The history of Android-based IMSI catcher detection is one of abandoned projects
 
 The CellGuard research is particularly relevant: it demonstrates that comparing observed cells against a known-good database is the most promising non-root approach, and it found meaningful detection accuracy for simulated IMSI catchers. Flock-You's trusted cell database implements a simplified version of this concept.
 
+#### With a Custom OS Fork
+
+Cellular detection sees the most dramatic improvement with a custom OS, primarily through baseband diagnostic interfaces:
+
+**Qualcomm QCDM (`/dev/diag`) access**: This is the crown jewel. Qualcomm's diagnostic mode (QCDM/DIAG) exposes raw baseband signaling messages. Stock Android's SELinux policy blocks all access to `/dev/diag`. A custom OS can:
+- Create a custom SELinux domain granting `diag_device` access to the detection daemon
+- Use [QCSuper](https://github.com/P1sec/QCSuper) or custom DIAG protocol parsers to read:
+  - **Null cipher detection (A5/0)**: Directly observe when the baseband selects A5/0 (no encryption) or A5/1 (weak encryption). This is definitive IMSI catcher evidence -- real networks use A5/3 or better.
+  - **Silent SMS (Type 0) interception**: The baseband processes Type 0 SMS silently. QCDM logs expose them before they're discarded. Silent SMS is a known IMSI catcher technique for confirming a target's presence.
+  - **IMSI paging vs TMSI**: Observe whether the network pages the device by IMSI (permanent identity) or TMSI (temporary). IMSI paging in an area where TMSI should be assigned indicates an improperly-configured or deliberately-stripping fake tower.
+  - **Authentication triplets**: Observe GSM/UMTS authentication challenge-response, detecting replayed or invalid authentication vectors.
+  - **Raw RRC/NAS messages**: Complete Radio Resource Control and Non-Access Stratum signaling, enabling detection of tracking area update rejects, identity requests, and security mode commands.
+
+**SnoopSnitch revival**: SRLabs' SnoopSnitch (abandoned for stock Android because it required root + Qualcomm) becomes viable again. The core analysis engine can be integrated directly into the OS, processing QCDM data in real-time rather than requiring manual capture.
+
+**RIL (Radio Interface Layer) shim**: The vendor RIL (`libril.so`, proprietary) can be wrapped with a shim library that intercepts all AT commands and QMI messages between the Android telephony framework and the baseband modem. This captures every command sent to and response received from the modem, enabling:
+- Real-time cipher mode change notifications
+- Cell reselection and handover command logging
+- PLMN search results with full signal details
+- Emergency call routing analysis
+
+**Android 14 `DISALLOW_CELLULAR_2G` enforcement**: On a custom OS, you can enforce 2G disablement by default at the framework level (not just exposing it as a toggle). Combined with carrier config overrides, this provides baseline protection against 2G downgrade attacks for all users of the OS, not just those who find the setting.
+
+**IMEI/IMSI access**: Platform signing grants `READ_PRIVILEGED_PHONE_STATE`, enabling direct IMEI and IMSI reads. Combined with QCDM data, the OS can definitively confirm: "An IMSI catcher on [frequency] using [cipher] captured IMSI [value] at [time]."
+
 #### Verdict
 
-Cellular detection provides genuinely useful heuristics, especially encryption downgrade detection and test MCC/MNC identification. The trusted cell database approach is validated by academic research. However, without root or OEM privileges, the app cannot access the baseband or confirm identity capture. Most single-indicator anomalies are correctly scored as LOW/INFO severity. The scoring system reflects honest confidence: only multi-indicator scenarios (downgrade + signal spike + unknown tower) reach HIGH/CRITICAL.
+Cellular detection provides genuinely useful heuristics on stock Android, especially encryption downgrade detection and test MCC/MNC identification. The trusted cell database approach is validated by academic research. However, without root or OEM privileges, the app cannot access the baseband or confirm identity capture. Most single-indicator anomalies are correctly scored as LOW/INFO severity. The scoring system reflects honest confidence: only multi-indicator scenarios (downgrade + signal spike + unknown tower) reach HIGH/CRITICAL. **A custom OS with Qualcomm QCDM access transforms cellular detection from heuristic guessing into definitive analysis** -- the single most impactful upgrade across all protocols.
 
 ---
 
@@ -311,9 +399,26 @@ Android exposes substantial GNSS data through two callback interfaces:
 
 Galileo's Open Service Navigation Message Authentication (OSNMA) became operational on July 24, 2025 -- the first GNSS system to offer authenticated navigation messages. However, OSNMA requires hardware-level support in the GNSS receiver chipset. It cannot be added via software update. As of early 2026, consumer Android phones with OSNMA-capable receivers are not widely available. Including it as a future confirmation method is appropriate forward planning, but it is not a current detection capability.
 
+#### With a Custom OS Fork
+
+A custom OS improves GNSS detection quality through HAL-level access:
+
+**Forced AGC reporting**: Automatic Gain Control (AGC) level is one of the strongest spoofing indicators -- a spoofer drives AGC high because it's a single strong source. Many chipsets compute AGC internally but don't report it through the standard `GnssMeasurement.getAutomaticGainControlLevelDb()` API because the GNSS HAL doesn't populate the field. A modified GNSS HAL can force AGC reporting on chipsets that support it internally (most Qualcomm and Broadcom GNSS receivers), significantly improving spoofing detection confidence.
+
+**Duty cycle elimination**: Stock Android duty-cycles GNSS measurements to save battery (especially on `BALANCED` and `LOW_POWER` location requests). A custom OS can force continuous GNSS measurement output at the HAL level, providing uninterrupted C/N0 and AGC time-series data. This enables detection of transient spoofing attacks that might start and stop between measurement duty cycles.
+
+**Raw navigation message processing**: The GNSS HAL can be modified to expose raw navigation messages (GPS LNAV, Galileo I/NAV, etc.) before the position engine processes them. This enables:
+- Direct Galileo OSNMA verification in software (on chipsets that output I/NAV pages but lack hardware OSNMA)
+- Detection of navigation message bit errors or timing anomalies introduced by meaconing (record-and-replay) attacks
+- Cross-validation of ephemeris data between the broadcast signal and independently-obtained almanac data
+
+**Galileo OSNMA software integration**: Even without hardware OSNMA support in the GNSS chipset, a custom OS can implement OSNMA authentication in software by capturing raw Galileo I/NAV pages from the HAL and verifying TESLA authentication chains against the OSNMA public key. This is computationally feasible on modern SoCs but requires chipset-level raw navigation message support.
+
+**Multi-receiver correlation**: A custom OS on a tablet or in-vehicle system could aggregate GNSS data from multiple receivers (e.g., phone + dashcam + external USB GPS), comparing positions and signal characteristics for spoofing detection. A single spoofer struggles to fool receivers at different physical locations.
+
 #### Verdict
 
-GNSS spoofing detection via C/N0 uniformity analysis is academically sound and validated by both Stanford research and Google's official guidance. Cross-constellation consistency checks are genuinely difficult for attackers to defeat. However, the urban false positive rate makes this impractical as an always-on detection in cities, which is where surveillance is most likely to occur. The decision to disable by default and only enable in PARANOID mode is the correct engineering tradeoff. Real-world utility is highest in open-sky environments (highways, rural areas, borders) where multipath is minimal.
+GNSS spoofing detection via C/N0 uniformity analysis is academically sound and validated by both Stanford research and Google's official guidance. Cross-constellation consistency checks are genuinely difficult for attackers to defeat. However, the urban false positive rate makes this impractical as an always-on detection in cities, which is where surveillance is most likely to occur. The decision to disable by default and only enable in PARANOID mode is the correct engineering tradeoff. Real-world utility is highest in open-sky environments (highways, rural areas, borders) where multipath is minimal. A custom OS fork adds forced AGC reporting and software OSNMA verification, meaningfully improving detection confidence on supported chipsets.
 
 ---
 
@@ -367,9 +472,26 @@ The persistence requirement (5 consecutive detections) and frequency stability c
 
 The most impactful limitation: `microphone`-type foreground services cannot start from `BOOT_COMPLETED` on Android 14+. Ultrasonic detection cannot auto-start after a reboot. Users must interact with the app to begin microphone monitoring. This is a significant practical limitation for a security tool that should ideally "just work."
 
+#### With a Custom OS Fork
+
+A custom OS addresses the two biggest ultrasonic detection limitations -- boot restrictions and hardware sensitivity:
+
+**Audio HAL DSP bypass**: Phone audio pipelines include DSP filters (noise cancellation, AGC, echo suppression) that attenuate or distort signals above the voice band. A modified Audio HAL can:
+- Bypass all DSP processing for a dedicated "raw" audio capture path, preserving ultrasonic signal fidelity
+- Disable high-frequency rolloff filters in the codec configuration (most audio codecs support 48 kHz or 96 kHz sample rates natively, but the HAL configures conservative rolloff)
+- Select specific microphone elements (many phones have 2-3 MEMS microphones) -- the one furthest from the earpiece speaker often has better high-frequency response
+
+**Higher sample rates**: Stock Android's AudioRecord typically maxes at 44.1 or 48 kHz via the public API. A custom Audio HAL can configure 96 kHz capture on supported codecs (Qualcomm WCD938x supports up to 384 kHz), extending the detection range to 48 kHz -- well into true ultrasonic territory beyond human hearing.
+
+**Boot-time initialization**: Android 14's `microphone` foreground service boot restriction is a framework-level check in `ActiveServices.java`. On a custom OS, ultrasonic detection runs as a platform-signed system service exempt from this restriction. Detection begins at boot, with no user interaction required.
+
+**Continuous background operation**: No battery optimization, no Doze throttling, no OEM process killing. The ultrasonic detector runs at full duty cycle indefinitely. Combined with DSP bypass, this makes the detection system significantly more sensitive and reliable.
+
+**Microphone concurrency**: When another app claims exclusive microphone access (voice call, voice recorder), stock Android silently fails `AudioRecord` initialization. A custom OS can implement audio sharing or prioritized capture, ensuring surveillance detection always has microphone access (potentially at reduced quality during voice calls).
+
 #### Verdict
 
-Ultrasonic beacon detection addresses a documented real-world threat (SilverPush, Alphonso) that was serious enough to prompt FTC investigation. The technical implementation (Goertzel algorithm, persistence filtering, frequency stability checks, encrypted audio buffers) is sound. However, the threat has diminished since 2016-2018, the primary remaining threat (audio fingerprinting) operates at audible frequencies outside the detection range, and false positive sources are numerous. Including ultrasonic detection as an optional protocol is appropriate; it should not be positioned as a primary detection capability.
+Ultrasonic beacon detection addresses a documented real-world threat (SilverPush, Alphonso) that was serious enough to prompt FTC investigation. The technical implementation (Goertzel algorithm, persistence filtering, frequency stability checks, encrypted audio buffers) is sound. However, the threat has diminished since 2016-2018, the primary remaining threat (audio fingerprinting) operates at audible frequencies outside the detection range, and false positive sources are numerous. Including ultrasonic detection as an optional protocol is appropriate; it should not be positioned as a primary detection capability. A custom OS fork improves sensitivity via DSP bypass and higher sample rates, and eliminates the boot restriction.
 
 ---
 
@@ -408,9 +530,34 @@ USB OTG SDR devices (RTL-SDR, HackRF, Airspy) work with Android via apps like RF
 
 Flipper Zero integration via USB serial or BLE can provide sub-GHz scan data (CC1101: 300-348/387-464/779-928 MHz), but the BLE link bandwidth limits real-time data resolution, and the official Flipper Android app is management-focused rather than data-streaming. Custom Flipper Application Package (FAP) code on the Flipper side and custom BLE serial protocol handling on the Android side would be required for meaningful real-time RF data streaming.
 
+#### With a Custom OS Fork
+
+A custom OS cannot conjure RF hardware that doesn't exist, but it can significantly improve what's achievable with the hardware that does exist:
+
+**WiFi-band RF monitoring via management frames**: With monitor mode enabled (see WiFi section), the WiFi radio becomes a passive 2.4/5/6 GHz spectrum monitor. Management frame capture reveals:
+- All nearby device probe requests (device inventory without requiring association)
+- Beacon frames from hidden APs (SSIDs cloaked from scan results)
+- Channel utilization and interference patterns
+- Wideband energy detection (some chipsets report per-channel noise floor via driver statistics)
+
+This isn't true spectrum analysis, but it provides meaningful RF awareness in the WiFi bands without external hardware.
+
+**eBPF on WiFi driver**: eBPF programs attached to the `mac80211` or vendor WiFi driver can monitor management frame statistics (deauth count, probe request rate, beacon timing jitter) without the overhead of full packet capture. This enables lightweight, always-on WiFi-band anomaly detection.
+
+**Custom kernel drivers for USB SDR**: Stock Android has no drivers for RTL2832U (RTL-SDR), HackRF, or Airspy hardware. A custom kernel can include:
+- `rtl-sdr` kernel module for RTL2832U dongles (~$25, 24-1766 MHz)
+- `hackrf` kernel module for HackRF One (~$350, 1-6000 MHz)
+- Custom Android system service wrapping `librtlsdr` or `libhackrf` for integrated spectrum scanning
+
+This transforms USB SDR from "manual external tool" to "integrated subsystem" -- the detection app can command SDR hardware for targeted frequency sweeps when other indicators suggest RF surveillance (e.g., BLE detection of a jammer-associated device triggers a sub-GHz sweep).
+
+**Flipper Zero deep integration**: With custom USB serial drivers and a purpose-built Flipper Application Package (FAP), the custom OS can maintain a persistent high-bandwidth data link to a Flipper Zero, streaming sub-GHz spectrum data in real-time rather than the limited BLE link bandwidth available on stock Android.
+
+**What remains impossible**: Sub-GHz RF reception (315/433/868/915 MHz) still requires external hardware. The phone's internal radios cannot be repurposed as wideband SDRs -- they are fixed-function ASIC designs, not software-defined. No amount of OS modification changes this.
+
 #### Verdict
 
-RF spectrum detection is the honest weakest link. Without external hardware, it provides only crude WiFi-based proxy analysis with high false positive rates. This limitation cannot be overcome through software -- it's a hardware constraint of the Android platform. Positioning RF detection as requiring Flipper Zero or SDR hardware, and being transparent about the WiFi-proxy limitations, is the only honest approach.
+RF spectrum detection remains the weakest link even with a custom OS, because the fundamental constraint is hardware, not software. However, a custom OS meaningfully expands WiFi-band monitoring through management frame capture and eBPF hooks, and enables tight integration with USB SDR hardware and Flipper Zero that is impractical on stock Android. The honest framing: a custom OS upgrades RF detection from "none" to "partial (WiFi bands) + integrated external hardware."
 
 ---
 
@@ -438,9 +585,21 @@ RF spectrum detection is the honest weakest link. Without external hardware, it 
 - **NTN band validation**: NRARFCN checked against valid NTN frequency ranges
 - **Provider allowlisting**: T-Mobile Starlink and Skylo NTN patterns are whitelisted to prevent false positives for legitimate services
 
+#### With a Custom OS Fork
+
+**Enhanced RIL hooks for NTN signaling**: A vendor RIL wrapper (see Cellular section) can intercept NTN-specific signaling messages, including:
+- Satellite handover commands and parameters
+- NTN timing advance values (which encode satellite distance/orbit)
+- Feeder link frequency information
+- Satellite ephemeris data broadcast by the network
+
+**Forced NTN parameter logging**: The `SatelliteManager` APIs (Android 14+) are gated behind `@SystemApi`. A custom OS has full access, enabling continuous monitoring of satellite connectivity state, provisioning status, and modem satellite capabilities without reflection hacks.
+
+**Baseband NTN diagnostics**: On Qualcomm chipsets with NTN modem support (Snapdragon Modem-RF with 3GPP Release 17 NTN), QCDM can expose raw NTN signaling events -- satellite acquisition, timing synchronization, handoff triggers -- providing much richer telemetry than the application-layer RTT heuristics available on stock Android.
+
 #### Verdict
 
-This is almost entirely forward-looking. NTN satellite connectivity is in its infancy (SMS-only, limited geographic coverage). Most users will never trigger NTN detections. The code appropriately handles the fringe-coverage transition false positive case (briefly entering/exiting Starlink coverage areas). As NTN deployment expands, this protocol will become increasingly relevant. For now, it represents future-proofing rather than practical current utility.
+This is almost entirely forward-looking. NTN satellite connectivity is in its infancy (SMS-only, limited geographic coverage). Most users will never trigger NTN detections. The code appropriately handles the fringe-coverage transition false positive case (briefly entering/exiting Starlink coverage areas). As NTN deployment expands, this protocol will become increasingly relevant -- and a custom OS with RIL hooks and QCDM access will be well-positioned to provide deep NTN security analysis. For now, it represents future-proofing rather than practical current utility.
 
 ---
 
@@ -462,19 +621,32 @@ Cross-protocol correlation is where an Android-based approach has a unique advan
 
 ## The Privilege Gap
 
-The three-tier privilege architecture (sideload/system/OEM) maps directly to Android's actual capability boundaries:
+The four-tier privilege architecture (sideload/system/OEM/custom OS) maps directly to Android's actual capability boundaries:
 
-| Capability | Sideload | System | OEM | Impact on Detection |
-|---|---|---|---|---|
-| WiFi scan rate | 4/2 min | Unrestricted | Unrestricted | Evil twin detection speed |
-| BLE scan duty cycle | 25s on / 5s off | 60s on / 1s off | Continuous | Tracker detection coverage |
-| Real WiFi MACs | No (randomized) | Yes (`PEERS_MAC_ADDRESS`) | Yes | AP tracking accuracy |
-| IMEI/IMSI access | No | No | Yes | **IMSI capture proof** |
-| Silent SMS detection | No | No | Yes | Targeted surveillance detection |
-| Process persistence | Standard | Enhanced | Persistent | Long-term monitoring reliability |
-| WiFi throttle bypass | No | Yes (hidden API) | Yes | Scan cadence |
+| Capability | Sideload | System | OEM | Custom OS | Impact on Detection |
+|---|---|---|---|---|---|
+| WiFi scan rate | 4/2 min | Unrestricted | Unrestricted | **Continuous (1-2s)** | Evil twin detection speed |
+| WiFi monitor mode | No | No | No | **Yes (chipset-dependent)** | Deauth/Karma/MITM detection |
+| WiFi packet injection | No | No | No | **Yes (Nexmon chipsets)** | Active rogue AP testing |
+| BLE scan duty cycle | 25s on / 5s off | 60s on / 1s off | Continuous | **Continuous (no throttle)** | Tracker detection coverage |
+| Raw BLE HCI access | No | No | No | **Yes** | Deep BLE protocol analysis |
+| Real WiFi MACs | No (randomized) | Yes (`PEERS_MAC_ADDRESS`) | Yes | **Yes** | AP tracking accuracy |
+| IMEI/IMSI access | No | No | Yes | **Yes** | IMSI capture proof |
+| Silent SMS detection | No | No | Yes | **Yes (QCDM)** | Targeted surveillance detection |
+| Null cipher (A5/0) detection | No | No | No | **Yes (QCDM, Qualcomm)** | Definitive IMSI catcher proof |
+| Raw baseband signaling | No | No | No | **Yes (QCDM, Qualcomm)** | Full cellular security analysis |
+| GNSS AGC (forced) | Chipset-dependent | Chipset-dependent | Chipset-dependent | **Yes (HAL mod)** | Spoofing detection confidence |
+| GNSS duty cycle bypass | No | No | Partial | **Yes** | Continuous spoofing monitoring |
+| Ultrasonic boot start | No (Android 14+) | No | Yes | **Yes** | Boot-time audio monitoring |
+| Audio DSP bypass | No | No | No | **Yes (HAL mod)** | Ultrasonic sensitivity |
+| USB SDR integration | Manual (user app) | Manual | Manual | **Kernel driver** | Integrated spectrum analysis |
+| Process persistence | Standard | Enhanced | Persistent | **System service** | Long-term monitoring reliability |
+| OEM background killing | Vulnerable | Less vulnerable | Immune | **Immune (you ARE the OEM)** | Service reliability |
+| 2G enforcement | User toggle | User toggle | Configurable | **Default-on, enforced** | Baseline IMSI protection |
 
-**The critical gap is IMEI/IMSI access.** Without OEM privileges, the app can detect indicators of IMSI catcher operation (encryption downgrade, signal anomalies, unknown cells) but cannot confirm that the device's identity was actually captured. This is the difference between "something suspicious is happening with the cell network" and "an IMSI catcher just stole your phone's identity."
+**The critical gap on stock Android is IMEI/IMSI access and baseband visibility.** Without OEM privileges, the app can detect indicators of IMSI catcher operation (encryption downgrade, signal anomalies, unknown cells) but cannot confirm that the device's identity was actually captured. This is the difference between "something suspicious is happening with the cell network" and "an IMSI catcher just stole your phone's identity."
+
+**A custom OS closes this gap entirely on Qualcomm devices** via QCDM access, and additionally unlocks capabilities that even OEM installs cannot achieve: WiFi monitor mode, raw HCI access, null cipher detection, and Audio HAL bypass.
 
 For a sideloaded app, the most impactful limitation is BLE duty cycling and WiFi scan throttling, which reduce detection cadence and create time windows where threats can be missed.
 
@@ -551,29 +723,126 @@ Despite the limitations, Android is a surprisingly good platform for surveillanc
 
 ---
 
-## Hard Limitations That Cannot Be Overcome
+## Hard Limitations
 
-These are fundamental platform constraints, not engineering challenges:
+### Limitations Solved by a Custom OS
 
-1. **No raw 802.11 frame access.** Without monitor mode, WiFi attack detection (deauth, Karma, MITM) is limited to indirect heuristics. This cannot be fixed without rooting the device or using external hardware (ESP8266/ESP32 deauth detector).
+These constraints are real on stock Android but disappear when you control the OS:
 
-2. **No baseband access.** The cellular modem is a black box. IMSI capture, cipher suite selection, silent SMS, and signaling-layer events are invisible. Even root cannot access the baseband on most devices. Only Qualcomm devices with root + specific diag drivers (as used by SnoopSnitch) can observe raw radio frames.
+1. **No raw 802.11 frame access** (stock). Without monitor mode, WiFi attack detection (deauth, Karma, MITM) is limited to indirect heuristics. **Custom OS solution**: Nexmon firmware patches (Broadcom/Cypress) or `qcacld-3.0` driver config (Qualcomm) enable full monitor mode with management frame capture and optional packet injection.
 
-3. **No RF spectrum access.** Android is not an SDR. Sub-GHz detection (garage door frequencies, car key fobs, surveillance transmitters) requires external hardware (Flipper Zero, RTL-SDR, HackRF).
+2. **Scan throttling** (stock). WiFi (4 scans/2 min) and BLE duty cycling create detection gaps where threats can be present but invisible. **Custom OS solution**: Patch out throttling in `GattService.java` and `WifiScanningServiceImpl` at the framework source level.
 
-4. **MAC randomization.** Both the local device and many remote BLE devices rotate MAC addresses. Stable tracking requires alternative fingerprinting (advertising payload analysis), which is imperfect.
+3. **OEM background killing** (stock). Aggressive battery optimization by device manufacturers (Xiaomi, Huawei, Samsung, OnePlus) can kill the scanning service with no reliable programmatic workaround. **Custom OS solution**: You are the OEM. No aggressive killing exists unless you build it.
 
-5. **Scan throttling.** WiFi (4 scans/2 min) and BLE duty cycling create detection gaps where threats can be present but invisible. Cannot be bypassed without system privileges.
+4. **Microphone boot restriction** (stock, Android 14+). Ultrasonic detection cannot auto-start after reboot. **Custom OS solution**: Platform-signed system services are exempt from foreground service type restrictions.
 
-6. **OEM background killing.** Aggressive battery optimization by device manufacturers (Xiaomi, Huawei, Samsung, OnePlus) can kill the scanning service with no reliable programmatic workaround.
+5. **MAC randomization of local device** (stock). The local device's WiFi and BLE MACs are randomized. **Custom OS solution**: Platform signing grants `LOCAL_MAC_ADDRESS` and `PEERS_MAC_ADDRESS`. Note: remote devices still randomize their MACs, which remains a challenge.
 
-7. **Microphone boot restriction.** Ultrasonic detection cannot auto-start after reboot on Android 14+.
+6. **No IMEI/IMSI access** (stock sideload). Cannot confirm IMSI catcher identity capture. **Custom OS solution**: Platform signing grants `READ_PRIVILEGED_PHONE_STATE` for full IMEI/IMSI access.
+
+### Limitations That Persist Even With a Custom OS
+
+These are fundamental hardware and physics constraints that no software modification can overcome:
+
+1. **Closed-source baseband firmware.** The cellular modem runs proprietary firmware from Qualcomm, Samsung, MediaTek, or Intel. Even with root and OS control, you cannot modify baseband behavior, audit its security, or prevent it from responding to IMSI requests. Qualcomm's QCDM provides *observability* (reading diagnostic data) but not *control* (changing modem behavior). The baseband can still be exploited via over-the-air attacks (see: Google Project Zero baseband research, Samsung Shannon vulnerabilities). The only true mitigation is hardware isolation -- physically separating the baseband from the application processor, as PinePhone and Librem 5 attempt with hardware kill switches.
+
+2. **No sub-GHz RF reception.** Android devices contain no hardware capable of receiving signals below ~2.4 GHz (WiFi) or ~700 MHz (cellular, and only within carrier bands). Frequencies like 315/433/868/915 MHz (garage door openers, car key fobs, surveillance transmitters, LoRa) are physically impossible to receive without external hardware (Flipper Zero CC1101, RTL-SDR, HackRF). No software modification changes this -- it's an antenna and RF front-end limitation.
+
+3. **Physical microphone frequency response.** MEMS microphones are physically optimized for human speech. While DSP bypass and higher sample rates help (custom OS), the microphone element itself has 10-20 dB sensitivity loss above 18 kHz compared to mid-frequency response. True ultrasonic signals (>22 kHz) require progressively stronger sources to be detected. This is a physics limitation of the transducer.
+
+4. **Antenna and RF front-end design.** Phone antennas are tuned for specific cellular, WiFi, and Bluetooth bands. Even with software changes, you cannot receive signals outside the hardware's designed frequency ranges or achieve the sensitivity/selectivity of purpose-built receivers. A phone with WiFi monitor mode still has a consumer-grade WiFi antenna, not a directional antenna suitable for signal hunting.
+
+5. **Remote BLE MAC randomization.** While a custom OS can read its own real MAC, other devices' BLE Resolvable Private Addresses (RPAs) rotate independently. Tracking rotating-MAC devices still requires advertising payload fingerprinting, which is inherently imperfect. Only devices in the IRK (Identity Resolving Key) bond list can have their MACs resolved -- and surveillance equipment won't be bonded.
+
+6. **Chipset-specific capabilities.** QCDM requires a Qualcomm modem. Nexmon requires Broadcom/Cypress WiFi. AGC reporting depends on the GNSS chipset. A custom OS can't add capabilities the silicon doesn't support -- it can only unlock what's already there but hidden. Device selection is critical.
+
+---
+
+## Building a Surveillance Detection OS
+
+If stock Android's limitations are unacceptable and an OEM partnership isn't achievable, the remaining option is building a custom AOSP fork purpose-built for surveillance detection. This is a substantial undertaking, but the security research community has proven it's feasible.
+
+### Target Hardware
+
+Device selection is the most consequential decision, because chipset determines which capabilities are unlockable:
+
+| Device | WiFi Chipset | WiFi Monitor Mode | Cellular Modem | QCDM Access | GNSS | Recommended For |
+|---|---|---|---|---|---|---|
+| **Samsung S10/S20 (Exynos)** | Broadcom BCM4375 | **Yes (Nexmon)** | Samsung Shannon | Limited | Broadcom | WiFi attack detection focus |
+| **Google Pixel 4/5** | Qualcomm QCA6390 | **Yes (qcacld-3.0)** | Qualcomm SDX55 | **Yes** | Qualcomm | Cellular IMSI catcher focus |
+| **Google Pixel 6/7** | Broadcom BCM4389 | **Yes (Nexmon)** | Samsung Exynos 5300 | Limited | Qualcomm | Balanced (WiFi + GNSS) |
+| **Google Pixel 8/9** | Broadcom BCM4398 | Likely (Nexmon WIP) | Samsung Exynos 5400 | Limited | Qualcomm | Future-proofing + Gemini Nano |
+| **OnePlus 7/8** | Qualcomm QCA6390 | **Yes (qcacld-3.0)** | Qualcomm SDX55 | **Yes** | Qualcomm | Budget QCDM option |
+| **PinePhone Pro** | RTL8723CS | Limited | Quectel EG25-G | **Yes (AT commands)** | u-blox | Hardware isolation research |
+
+**The ideal surveillance detection device does not exist.** No single phone has Broadcom WiFi (best Nexmon support) + Qualcomm modem (best QCDM) + modern SoC. The best current compromise is:
+- **For WiFi focus**: Samsung Galaxy S10e/S20 Exynos with Nexmon
+- **For cellular focus**: Pixel 4/5 or OnePlus 7T with Qualcomm modem + QCDM
+- **For maximum breadth**: Pixel 6/7 (Broadcom WiFi for Nexmon + good GNSS + Tensor NPU for on-device LLM)
+
+### Recommended Base OS
+
+| Base OS | Pros | Cons | Best For |
+|---|---|---|---|
+| **AOSP** | Maximum control, no vendor additions | Minimal device support, must provide device trees | Purpose-built detection appliance |
+| **LineageOS** | Wide device support (300+ devices), active community, regular security patches | Some vendor-specific modifications, governance overhead | Broadest hardware compatibility |
+| **GrapheneOS** | Hardened security baseline, memory safety focus, modern Pixel support | Pixel-only, opinionated about modifications, may conflict with custom HALs | Security-first platform (if Pixel hardware meets needs) |
+| **CalyxOS** | Good balance of usability + security, microG support | Pixel-focused, less aggressive hardening than Graphene | Usability-focused deployment |
+
+**Recommendation**: Start with AOSP for a dedicated detection device (maximum control, no unexpected vendor behavior). Use LineageOS as a base if you need to support multiple device models. Don't fork GrapheneOS unless you're building on Pixels and want to contribute upstream -- their hardening is valuable but their development model is tightly controlled.
+
+### Key Kernel/Framework Modifications (Priority Order)
+
+1. **SELinux policy for `/dev/diag`** (Qualcomm): Highest-impact, lowest-effort change. Add a custom domain for the detection daemon with `diag_device` access. Unlocks all QCDM capabilities.
+
+2. **WiFi monitor mode**: Enable `CONFIG_WLAN_MONITOR_MODE` in kernel config (Qualcomm) or apply Nexmon patches (Broadcom). Create a virtual monitor interface at boot. Medium effort, transformative for WiFi attack detection.
+
+3. **BLE scan throttle removal**: Patch `GattService.java` to remove `numScansStopped` check. Low effort, immediate improvement.
+
+4. **WiFi scan throttle removal**: Patch `WifiScanningServiceImpl` to remove the 4-per-2-minutes limit. Low effort, immediate improvement.
+
+5. **Audio HAL modification**: Configure raw capture path bypassing DSP, enable 96 kHz sample rate. Medium effort, improves ultrasonic detection.
+
+6. **GNSS HAL modification**: Force AGC reporting, disable duty cycling. Medium-high effort (requires chipset-specific HAL knowledge), improves spoofing detection confidence.
+
+7. **USB SDR kernel drivers**: Add `rtl-sdr` and `hackrf` kernel modules. Medium effort, enables integrated spectrum analysis.
+
+8. **RIL wrapper/shim**: Intercept vendor RIL commands. High effort (vendor-specific, requires reverse engineering), provides deep cellular observability.
+
+### Comparison with Existing Security-Focused Mobile OSes
+
+| OS | Surveillance Detection Focus | Key Differentiator | Limitation |
+|---|---|---|---|
+| **GrapheneOS** | Defensive hardening (not detection) | Memory safety, exploit mitigations, sensor/network toggles | Does not detect surveillance -- prevents exploitation |
+| **CalyxOS** | Privacy features | microG, Datura firewall, SeedVault backup | No surveillance detection capabilities |
+| **CopperheadOS** | Enterprise hardening | Commercial security focus | Proprietary, no detection features |
+| **Replicant** | Software freedom | Fully open-source (no proprietary blobs) | Very limited device support, missing hardware features |
+| **PinePhone / Librem 5** | Hardware kill switches | Physical radio disconnect (baseband, WiFi, mic, camera) | Weak SoC (Allwinner A64 / i.MX8), limited app ecosystem |
+| **Custom Detection OS** | Active surveillance detection | WiFi monitor mode, QCDM, integrated SDR, 7-protocol scanning | Must be built and maintained; no existing project does this |
+
+**Key insight**: Existing security-focused mobile OSes focus on *defense* (preventing exploitation, hardening the attack surface, isolating hardware). None focus on *detection* (actively identifying nearby surveillance equipment). A surveillance detection OS occupies an entirely different niche.
+
+### The Baseband Problem
+
+Even with full OS control, the cellular baseband remains the elephant in the room. The baseband modem:
+- Runs proprietary firmware (Qualcomm MDM, Samsung Shannon, MediaTek) with no source code available
+- Has DMA (Direct Memory Access) to main system memory on many designs
+- Processes all over-the-air cellular signaling, including IMSI requests, before the application processor sees anything
+- Has its own independent processor, memory, and real-time operating system
+- Has been demonstrated to contain exploitable vulnerabilities (Google Project Zero's Samsung Shannon research, Qualcomm MDM buffer overflows)
+
+**QCDM provides observability, not control.** You can *see* what the baseband did (accepted a null cipher, responded to an IMSI request) but you cannot *prevent* it from doing so. The modem will always respond to the network -- that's its fundamental purpose.
+
+**Hardware isolation is the only real solution.** The PinePhone approach (hardware kill switch that physically disconnects the modem from the SoC's USB bus) provides true baseband isolation. When the cellular radio is off, it literally cannot access system memory or respond to over-the-air commands. The Librem 5 takes a similar approach with separate M.2 modem cards. For a surveillance detection OS on mainstream Android hardware, the baseband remains a trust-but-verify component -- QCDM lets you verify what it's doing, but you can't stop it from responding to a sufficiently-capable IMSI catcher's initial identity request.
 
 ---
 
 ## The Honest Verdict
 
-**Android-based surveillance detection is a legitimate and useful capability with well-defined boundaries.**
+**Android-based surveillance detection is a legitimate and useful capability with well-defined boundaries -- and those boundaries shift dramatically depending on how much of the platform you control.**
+
+### On Stock Android (Sideloaded App)
 
 It is **not** a replacement for professional TSCM (Technical Surveillance Countermeasures) equipment. It cannot detect a properly-built IMSI catcher with certainty. It cannot find hidden RF transmitters without external hardware. It cannot observe WiFi attack frames.
 
@@ -586,7 +855,31 @@ It **is** effective at:
 
 The greatest strength is **breadth and correlation**: monitoring 7 protocols simultaneously on a device the user already carries. The greatest weakness is **depth**: each protocol provides heuristic indicators rather than definitive proof, constrained by Android's security sandbox.
 
-For journalists, activists, lawyers, and privacy-conscious individuals, this represents a meaningful step up from no detection capability -- provided users understand what it can and cannot tell them. The most important design decision is **honest communication**: scoring anomalies conservatively, labeling feasibility clearly, disabling high-false-positive protocols by default, and never claiming certainty where only probability exists.
+### With a Custom OS Fork
+
+A custom AOSP fork shifts the calculus significantly. The "Hard Limitations" section of this document shrinks from 7 items to 6 persistent hardware constraints, while formerly-impossible capabilities become achievable:
+
+| Capability | Stock Sideload | Stock OEM | Custom OS |
+|---|---|---|---|
+| BLE device identification | Excellent | Excellent | Excellent (+ raw HCI) |
+| BLE tracker following | Good | Good | Excellent (no scan gaps) |
+| WiFi surveillance device identification | Good | Good | Excellent (+ hidden AP discovery) |
+| WiFi attack detection (deauth/Karma/MITM) | **Not feasible** | **Not feasible** | **Fully feasible** |
+| Cellular IMSI catcher heuristics | Medium | Medium-High | **Definitive (QCDM)** |
+| Null cipher / A5/0 detection | **Not feasible** | **Not feasible** | **Fully feasible (Qualcomm)** |
+| Silent SMS detection | **Not feasible** | Possible | **Fully feasible** |
+| GNSS spoofing detection | Medium (high FP) | Medium (high FP) | Good (forced AGC, OSNMA) |
+| Ultrasonic beacon detection | Limited | Limited | Good (DSP bypass, boot start) |
+| Sub-GHz RF analysis | **Not feasible** | **Not feasible** | **Not feasible** (hardware) |
+| Integrated USB SDR | Manual only | Manual only | **Kernel-level integration** |
+
+The cost is maintaining an entire operating system -- kernel patches, security updates, device-specific HAL work, and the ongoing burden of tracking upstream AOSP changes. This is not a weekend project; it's an ongoing engineering commitment comparable to what GrapheneOS or LineageOS maintainers undertake.
+
+### The Bottom Line
+
+For journalists, activists, lawyers, and privacy-conscious individuals, a stock Android sideloaded app represents a meaningful step up from no detection capability -- provided users understand what it can and cannot tell them. For organizations with the engineering resources to maintain a custom OS, the ceiling is dramatically higher: definitive IMSI catcher detection, real WiFi attack monitoring, and integrated RF analysis become achievable on carefully-chosen hardware.
+
+The most important design decision remains **honest communication**: scoring anomalies conservatively, labeling feasibility clearly, disabling high-false-positive protocols by default, and never claiming certainty where only probability exists -- regardless of privilege level.
 
 ---
 
@@ -621,6 +914,22 @@ For journalists, activists, lawyers, and privacy-conscious individuals, this rep
 - DeFlock: [deflock.me](https://deflock.me)
 - EFF: IMSI catcher documentation
 - Don't Kill My App: [dontkillmyapp.com](https://dontkillmyapp.com)
+- Google Project Zero: [Samsung Shannon baseband research](https://googleprojectzero.blogspot.com/2023/03/multiple-internet-to-baseband-remote-rce.html)
+- Google Security Blog: [Baseband Hardening in Android](https://security.googleblog.com/2024/10/pixel-hardening-cellular-basebands-in.html)
+
+### Custom OS & Baseband Tools
+- [Nexmon](https://nexmon.org/) -- Broadcom/Cypress WiFi firmware patching framework (monitor mode, packet injection)
+- [QCSuper](https://github.com/P1sec/QCSuper) -- Qualcomm QCDM/DIAG protocol tool for baseband diagnostic capture
+- [nl80211 Documentation](https://wireless.wiki.kernel.org/en/developers/documentation/nl80211) -- Linux wireless netlink interface for WiFi control
+- [eBPF LSM](https://docs.kernel.org/bpf/prog_lsm.html) -- Linux Security Module hooks via eBPF programs
+- [qcacld-3.0](https://source.codeaurora.org/quic/la/platform/vendor/qcom-opensource/wlan/qcacld-3.0/) -- Qualcomm open-source WiFi driver (monitor mode support)
+
+### Security-Focused Mobile OSes
+- [GrapheneOS](https://grapheneos.org/) -- Privacy and security hardened Android (Pixel devices)
+- [CalyxOS](https://calyxos.org/) -- Privacy-focused Android with microG (Pixel + Fairphone)
+- [LineageOS](https://lineageos.org/) -- Open-source Android distribution (300+ devices)
+- [PinePhone](https://www.pine64.org/pinephone/) -- Linux smartphone with hardware kill switches
+- [Librem 5](https://puri.sm/products/librem-5/) -- Privacy-focused smartphone with hardware kill switches and separate modem
 
 ### Industry & Standards
 - EU Agency for the Space Programme: [Galileo OSNMA](https://www.euspa.europa.eu/newsroom-events/news/introducing-new-galileo-authentication-service-osnma-join-webinar-september)

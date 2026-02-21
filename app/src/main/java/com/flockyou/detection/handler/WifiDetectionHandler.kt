@@ -9,6 +9,7 @@ import com.flockyou.data.model.DetectionMethod
 import com.flockyou.data.model.DetectionPattern
 import com.flockyou.data.model.DetectionPatterns
 import com.flockyou.data.model.DetectionProtocol
+import com.flockyou.detection.config.DetectionConstants
 import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.ThreatLevel
 import com.flockyou.data.model.rssiToSignalStrength
@@ -106,19 +107,14 @@ class WifiDetectionHandler @Inject constructor(
     companion object {
         private const val TAG = "WifiDetectionHandler"
 
-        // ==================== THRESHOLD CONFIGURATION ====================
+        // ==================== CENTRALIZED CONSTANTS (see DetectionConstants) ====================
+        // Thresholds and timing constants are defined in DetectionConstants.Common.
+        // Local aliases are provided for backward compatibility.
 
-        /** Minimum RSSI for detection consideration (-100 dBm = very weak, -30 dBm = very strong) */
-        const val DEFAULT_RSSI_THRESHOLD = -90
-
-        /** Strong signal threshold for proximity alerts */
-        const val STRONG_SIGNAL_RSSI = -50
-
-        /** Very close proximity threshold */
-        const val IMMEDIATE_PROXIMITY_RSSI = -40
-
-        /** Rate limit between detections of the same device (milliseconds) */
-        const val DETECTION_RATE_LIMIT_MS = 30000L
+        const val DEFAULT_RSSI_THRESHOLD = DetectionConstants.Common.DEFAULT_RSSI_THRESHOLD
+        const val STRONG_SIGNAL_RSSI = DetectionConstants.Common.STRONG_SIGNAL_RSSI
+        const val IMMEDIATE_PROXIMITY_RSSI = DetectionConstants.Common.IMMEDIATE_PROXIMITY_RSSI
+        const val DETECTION_RATE_LIMIT_MS = DetectionConstants.Common.DETECTION_RATE_LIMIT_MS
 
         // ==================== CACHED DEVICE TYPE SETS ====================
         // Pre-allocated sets for device type checks to avoid allocation on every call

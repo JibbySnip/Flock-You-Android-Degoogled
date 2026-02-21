@@ -37,7 +37,7 @@ import java.util.UUID
  */
 class CellularMonitor(
     private val context: Context,
-    private val errorCallback: ScanningService.DetectorCallback? = null
+    private val errorCallback: DetectorCallback? = null
 ) {
     
     companion object {
@@ -587,7 +587,7 @@ class CellularMonitor(
         if (!hasPermissions()) {
             Log.w(TAG, "Missing required permissions for cellular monitoring")
             errorCallback?.onError(
-                ScanningService.DetectorHealthStatus.DETECTOR_CELLULAR,
+                DetectorHealthStatus.DETECTOR_CELLULAR,
                 "Missing required cellular permissions",
                 recoverable = false
             )
@@ -609,11 +609,11 @@ class CellularMonitor(
 
         try {
             registerCellListener()
-            errorCallback?.onDetectorStarted(ScanningService.DetectorHealthStatus.DETECTOR_CELLULAR)
+            errorCallback?.onDetectorStarted(DetectorHealthStatus.DETECTOR_CELLULAR)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register cell listener", e)
             errorCallback?.onError(
-                ScanningService.DetectorHealthStatus.DETECTOR_CELLULAR,
+                DetectorHealthStatus.DETECTOR_CELLULAR,
                 "Failed to register cell listener: ${e.message}",
                 recoverable = true
             )
@@ -640,12 +640,12 @@ class CellularMonitor(
                         }
                     }
                 }
-                errorCallback?.onScanSuccess(ScanningService.DetectorHealthStatus.DETECTOR_CELLULAR)
+                errorCallback?.onScanSuccess(DetectorHealthStatus.DETECTOR_CELLULAR)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error taking initial cell snapshot", e)
             errorCallback?.onError(
-                ScanningService.DetectorHealthStatus.DETECTOR_CELLULAR,
+                DetectorHealthStatus.DETECTOR_CELLULAR,
                 "Error taking cell snapshot: ${e.message}",
                 recoverable = true
             )
@@ -666,7 +666,7 @@ class CellularMonitor(
             description = "IMSI catcher detection paused"
         )
 
-        errorCallback?.onDetectorStopped(ScanningService.DetectorHealthStatus.DETECTOR_CELLULAR)
+        errorCallback?.onDetectorStopped(DetectorHealthStatus.DETECTOR_CELLULAR)
         Log.d(TAG, "Stopped cellular monitoring")
     }
 

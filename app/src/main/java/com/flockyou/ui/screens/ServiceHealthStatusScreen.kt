@@ -36,8 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.flockyou.service.CellularMonitor
-import com.flockyou.service.ScanningService
-import com.flockyou.service.ScanningService.DetectorHealthStatus
+import com.flockyou.service.DetectorHealthStatus
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -381,7 +380,7 @@ private fun TabIconWithBadge(
 @Composable
 private fun AlertBanner(
     detectorHealth: Map<String, DetectorHealthStatus>,
-    recentErrors: List<ScanningService.ScanError>,
+    recentErrors: List<com.flockyou.service.ScanError>,
     onNavigateToDetectors: () -> Unit,
     onNavigateToDiagnostics: () -> Unit
 ) {
@@ -568,7 +567,7 @@ fun SkeletonLoadingCard(
 @Composable
 private fun DashboardContent(
     detectorHealth: Map<String, DetectorHealthStatus>,
-    scanStatus: ScanningService.ScanStatus,
+    scanStatus: com.flockyou.service.ScanStatus,
     isScanning: Boolean,
     isBound: Boolean,
     uiState: MainUiState,
@@ -828,7 +827,7 @@ private fun QuickActionsRow(
  */
 @Composable
 private fun LiveScanActivityCard(
-    scanStats: ScanningService.ScanStatistics,
+    scanStats: com.flockyou.service.ScanStatistics,
     isScanning: Boolean
 ) {
     Card(
@@ -876,8 +875,8 @@ private fun LiveScanActivityCard(
  */
 @Composable
 private fun SeenDevicesSummaryContent(
-    bleDevices: List<ScanningService.SeenDevice>,
-    wifiNetworks: List<ScanningService.SeenDevice>,
+    bleDevices: List<com.flockyou.service.SeenDevice>,
+    wifiNetworks: List<com.flockyou.service.SeenDevice>,
     cellTowers: List<CellularMonitor.SeenCellTower>
 ) {
     val currentTime = System.currentTimeMillis()
@@ -914,7 +913,7 @@ private fun SeenDevicesSummaryContent(
 private fun IpcDebugContent(
     isBound: Boolean,
     isScanning: Boolean,
-    scanStatus: ScanningService.ScanStatus
+    scanStatus: com.flockyou.service.ScanStatus
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
@@ -1238,7 +1237,7 @@ private fun DetectorHealthCard(
 @Composable
 private fun DiagnosticsContent(
     detectorHealth: Map<String, DetectorHealthStatus>,
-    recentErrors: List<ScanningService.ScanError>,
+    recentErrors: List<com.flockyou.service.ScanError>,
     uiState: MainUiState,
     onNavigateToDetector: (String) -> Unit
 ) {
@@ -1512,7 +1511,7 @@ private fun SubsystemStatusCard(uiState: MainUiState) {
 @Composable
 private fun SubsystemRow(
     name: String,
-    status: ScanningService.SubsystemStatus
+    status: com.flockyou.service.SubsystemStatus
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1526,15 +1525,15 @@ private fun SubsystemRow(
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             val (statusText, statusColor) = when (status) {
-                ScanningService.SubsystemStatus.Idle -> "Idle" to MaterialTheme.colorScheme.outline
-                ScanningService.SubsystemStatus.Active -> "Active" to Color(0xFF4CAF50)
-                ScanningService.SubsystemStatus.Disabled -> "Disabled" to MaterialTheme.colorScheme.outline
-                is ScanningService.SubsystemStatus.Error -> "Error" to MaterialTheme.colorScheme.error
-                is ScanningService.SubsystemStatus.PermissionDenied -> "No Permission" to MaterialTheme.colorScheme.error
+                com.flockyou.service.SubsystemStatus.Idle -> "Idle" to MaterialTheme.colorScheme.outline
+                com.flockyou.service.SubsystemStatus.Active -> "Active" to Color(0xFF4CAF50)
+                com.flockyou.service.SubsystemStatus.Disabled -> "Disabled" to MaterialTheme.colorScheme.outline
+                is com.flockyou.service.SubsystemStatus.Error -> "Error" to MaterialTheme.colorScheme.error
+                is com.flockyou.service.SubsystemStatus.PermissionDenied -> "No Permission" to MaterialTheme.colorScheme.error
             }
 
             // Use pulsing indicator for active status
-            if (status == ScanningService.SubsystemStatus.Active) {
+            if (status == com.flockyou.service.SubsystemStatus.Active) {
                 PulsingStatusIndicator(color = statusColor, size = 8)
             } else {
                 Box(

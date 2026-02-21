@@ -106,7 +106,7 @@ import java.time.Duration
  */
 class SatelliteMonitor(
     private val context: Context,
-    private val errorCallback: com.flockyou.service.ScanningService.DetectorCallback? = null
+    private val errorCallback: com.flockyou.service.DetectorCallback? = null
 ) {
     
     companion object {
@@ -987,11 +987,11 @@ class SatelliteMonitor(
             // Check for satellite support on device
             checkDeviceSatelliteSupport()
 
-            errorCallback?.onDetectorStarted(com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_SATELLITE)
+            errorCallback?.onDetectorStarted(com.flockyou.service.DetectorHealthStatus.DETECTOR_SATELLITE)
         } catch (e: Exception) {
             Log.e(TAG, "Error starting satellite monitoring", e)
             errorCallback?.onError(
-                com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_SATELLITE,
+                com.flockyou.service.DetectorHealthStatus.DETECTOR_SATELLITE,
                 "Failed to start monitoring: ${e.message}",
                 recoverable = true
             )
@@ -1030,7 +1030,7 @@ class SatelliteMonitor(
         coroutineScope.cancel()
         coroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-        errorCallback?.onDetectorStopped(com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_SATELLITE)
+        errorCallback?.onDetectorStopped(com.flockyou.service.DetectorHealthStatus.DETECTOR_SATELLITE)
     }
     
     /**
@@ -1590,7 +1590,7 @@ class SatelliteMonitor(
         }
 
         // Report successful check for health monitoring
-        errorCallback?.onScanSuccess(com.flockyou.service.ScanningService.DetectorHealthStatus.DETECTOR_SATELLITE)
+        errorCallback?.onScanSuccess(com.flockyou.service.DetectorHealthStatus.DETECTOR_SATELLITE)
     }
     
     /**

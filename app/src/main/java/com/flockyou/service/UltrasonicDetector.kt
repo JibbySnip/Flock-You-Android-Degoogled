@@ -39,7 +39,7 @@ import kotlin.math.sqrt
  */
 class UltrasonicDetector(
     private val context: Context,
-    private val errorCallback: ScanningService.DetectorCallback? = null
+    private val errorCallback: DetectorCallback? = null
 ) {
 
     companion object {
@@ -468,7 +468,7 @@ class UltrasonicDetector(
         if (!hasPermission()) {
             Log.w(TAG, "Missing RECORD_AUDIO permission")
             errorCallback?.onError(
-                ScanningService.DetectorHealthStatus.DETECTOR_ULTRASONIC,
+                DetectorHealthStatus.DETECTOR_ULTRASONIC,
                 "Missing RECORD_AUDIO permission",
                 recoverable = false
             )
@@ -485,7 +485,7 @@ class UltrasonicDetector(
             description = "Monitoring for tracking beacons (18-22 kHz)"
         )
 
-        errorCallback?.onDetectorStarted(ScanningService.DetectorHealthStatus.DETECTOR_ULTRASONIC)
+        errorCallback?.onDetectorStarted(DetectorHealthStatus.DETECTOR_ULTRASONIC)
 
         // Start periodic scanning
         detectorJob = detectorScope.launch {
@@ -525,7 +525,7 @@ class UltrasonicDetector(
             description = "Beacon monitoring paused"
         )
 
-        errorCallback?.onDetectorStopped(ScanningService.DetectorHealthStatus.DETECTOR_ULTRASONIC)
+        errorCallback?.onDetectorStopped(DetectorHealthStatus.DETECTOR_ULTRASONIC)
         Log.d(TAG, "Stopped ultrasonic detection")
     }
 
@@ -586,7 +586,7 @@ class UltrasonicDetector(
                     Log.e(TAG, "AudioRecord failed to initialize")
                     consecutiveFailures++
                     errorCallback?.onError(
-                        ScanningService.DetectorHealthStatus.DETECTOR_ULTRASONIC,
+                        DetectorHealthStatus.DETECTOR_ULTRASONIC,
                         "AudioRecord failed to initialize (attempt $consecutiveFailures)",
                         recoverable = consecutiveFailures < maxConsecutiveFailures
                     )
@@ -659,13 +659,13 @@ class UltrasonicDetector(
 
                 // Report successful scan
                 consecutiveFailures = 0
-                errorCallback?.onScanSuccess(ScanningService.DetectorHealthStatus.DETECTOR_ULTRASONIC)
+                errorCallback?.onScanSuccess(DetectorHealthStatus.DETECTOR_ULTRASONIC)
 
             } catch (e: Exception) {
                 Log.e(TAG, "Error during ultrasonic scan", e)
                 consecutiveFailures++
                 errorCallback?.onError(
-                    ScanningService.DetectorHealthStatus.DETECTOR_ULTRASONIC,
+                    DetectorHealthStatus.DETECTOR_ULTRASONIC,
                     "Scan error: ${e.message ?: "Unknown error"} (attempt $consecutiveFailures)",
                     recoverable = consecutiveFailures < maxConsecutiveFailures
                 )

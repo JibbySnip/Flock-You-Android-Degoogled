@@ -2,6 +2,7 @@ package com.flockyou.detection.handler
 
 import android.net.wifi.ScanResult
 import com.flockyou.data.model.*
+import com.flockyou.detection.config.DetectionConstants
 import com.flockyou.service.RfSignalAnalyzer.RfAnomaly
 import com.flockyou.service.RfSignalAnalyzer.RfAnomalyType
 import com.flockyou.service.RfSignalAnalyzer.AnomalyConfidence
@@ -95,12 +96,12 @@ class RfDetectionHandler @Inject constructor() {
     companion object {
         private const val TAG = "RfDetectionHandler"
 
-        // Detection thresholds
-        private const val HIDDEN_NETWORK_SUSPICIOUS_COUNT = 10
-        private const val HIDDEN_NETWORK_SUSPICIOUS_RATIO = 0.35f
-        private const val SURVEILLANCE_CAMERA_MIN_COUNT = 5
-        private const val STRONG_SIGNAL_THRESHOLD = -50 // dBm
-        private const val SIGNAL_VARIANCE_LOW_THRESHOLD = 50f
+        // All RF thresholds centralized in DetectionConstants.Rf
+        private const val HIDDEN_NETWORK_SUSPICIOUS_COUNT = DetectionConstants.Rf.HIDDEN_NETWORK_SUSPICIOUS_COUNT
+        private const val HIDDEN_NETWORK_SUSPICIOUS_RATIO = DetectionConstants.Rf.HIDDEN_NETWORK_SUSPICIOUS_RATIO
+        private const val SURVEILLANCE_CAMERA_MIN_COUNT = DetectionConstants.Rf.SURVEILLANCE_CAMERA_MIN_COUNT
+        private const val STRONG_SIGNAL_THRESHOLD = DetectionConstants.Rf.STRONG_SIGNAL_THRESHOLD
+        private const val SIGNAL_VARIANCE_LOW_THRESHOLD = DetectionConstants.Rf.SIGNAL_VARIANCE_LOW_THRESHOLD
 
         // Known surveillance camera OUIs
         private val SURVEILLANCE_OUIS = setOf(

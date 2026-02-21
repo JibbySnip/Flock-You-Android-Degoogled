@@ -3,6 +3,7 @@ package com.flockyou.detection.handler
 import com.flockyou.data.model.Detection
 import com.flockyou.data.model.DetectionMethod
 import com.flockyou.data.model.DetectionProtocol
+import com.flockyou.detection.config.DetectionConstants
 import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.SignalStrength
 import com.flockyou.data.model.ThreatLevel
@@ -131,30 +132,30 @@ class UltrasonicDetectionHandler @Inject constructor() {
     companion object {
         private const val TAG = "UltrasonicDetectionHandler"
 
-        // Frequency tolerance for signature matching (Hz)
-        private const val FREQUENCY_TOLERANCE_HZ = 100
+        // All ultrasonic thresholds centralized in DetectionConstants.Ultrasonic
+        private const val FREQUENCY_TOLERANCE_HZ = DetectionConstants.Ultrasonic.FREQUENCY_TOLERANCE_HZ
 
         // Beacon source frequencies (Hz)
-        private const val FREQ_SILVERPUSH = 18000
-        private const val FREQ_SILVERPUSH_ALT = 18200
-        private const val FREQ_ALPHONSO = 18500
-        private const val FREQ_ZAPR = 17500
-        private const val FREQ_SIGNAL360 = 19000
-        private const val FREQ_REALEYES = 19200
-        private const val FREQ_LISNR = 19500
-        private const val FREQ_TVISION = 19800
-        private const val FREQ_SHOPKICK = 20000
-        private const val FREQ_SAMBA_TV = 20200
-        private const val FREQ_RETAIL_BAND_1 = 20500
-        private const val FREQ_RETAIL_BAND_2 = 21000
-        private const val FREQ_INSCAPE = 21500
-        private const val FREQ_DATA_PLUS_MATH = 22000
+        private const val FREQ_SILVERPUSH = DetectionConstants.Ultrasonic.FREQ_SILVERPUSH
+        private const val FREQ_SILVERPUSH_ALT = DetectionConstants.Ultrasonic.FREQ_SILVERPUSH_ALT
+        private const val FREQ_ALPHONSO = DetectionConstants.Ultrasonic.FREQ_ALPHONSO
+        private const val FREQ_ZAPR = DetectionConstants.Ultrasonic.FREQ_ZAPR
+        private const val FREQ_SIGNAL360 = DetectionConstants.Ultrasonic.FREQ_SIGNAL360
+        private const val FREQ_REALEYES = DetectionConstants.Ultrasonic.FREQ_REALEYES
+        private const val FREQ_LISNR = DetectionConstants.Ultrasonic.FREQ_LISNR
+        private const val FREQ_TVISION = DetectionConstants.Ultrasonic.FREQ_TVISION
+        private const val FREQ_SHOPKICK = DetectionConstants.Ultrasonic.FREQ_SHOPKICK
+        private const val FREQ_SAMBA_TV = DetectionConstants.Ultrasonic.FREQ_SAMBA_TV
+        private const val FREQ_RETAIL_BAND_1 = DetectionConstants.Ultrasonic.FREQ_RETAIL_BAND_1
+        private const val FREQ_RETAIL_BAND_2 = DetectionConstants.Ultrasonic.FREQ_RETAIL_BAND_2
+        private const val FREQ_INSCAPE = DetectionConstants.Ultrasonic.FREQ_INSCAPE
+        private const val FREQ_DATA_PLUS_MATH = DetectionConstants.Ultrasonic.FREQ_DATA_PLUS_MATH
 
-        // Thresholds for risk assessment
-        private const val HIGH_PERSISTENCE_THRESHOLD = 0.7f
-        private const val FOLLOWING_LOCATION_THRESHOLD = 2
-        private const val HIGH_SNR_THRESHOLD_DB = 20.0
-        private const val STRONG_AMPLITUDE_THRESHOLD_DB = -35.0
+        // Risk assessment thresholds
+        private const val HIGH_PERSISTENCE_THRESHOLD = DetectionConstants.Ultrasonic.HIGH_PERSISTENCE_THRESHOLD
+        private const val FOLLOWING_LOCATION_THRESHOLD = DetectionConstants.Ultrasonic.FOLLOWING_LOCATION_THRESHOLD
+        private const val HIGH_SNR_THRESHOLD_DB = DetectionConstants.Ultrasonic.HIGH_SNR_THRESHOLD_DB
+        private const val STRONG_AMPLITUDE_THRESHOLD_DB = DetectionConstants.Ultrasonic.STRONG_AMPLITUDE_THRESHOLD_DB
 
         // Cached sets for enum comparisons to avoid allocation on every call
         private val SOPHISTICATED_MODULATION_TYPES = setOf(

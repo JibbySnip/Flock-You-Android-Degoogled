@@ -218,7 +218,7 @@ fun SatelliteDetectionScreen(
 @Composable
 private fun SatelliteStatusContent(
     satelliteState: SatelliteConnectionState?,
-    satelliteStatus: com.flockyou.service.ScanningService.SubsystemStatus,
+    satelliteStatus: com.flockyou.service.SubsystemStatus,
     isScanning: Boolean
 ) {
     LazyColumn(
@@ -998,7 +998,7 @@ private fun GnssEventCard(
 @Composable
 private fun SatelliteMainConnectionCard(
     state: SatelliteConnectionState?,
-    status: com.flockyou.service.ScanningService.SubsystemStatus,
+    status: com.flockyou.service.SubsystemStatus,
     isScanning: Boolean
 ) {
     val isConnected = state?.isConnected == true
@@ -1130,9 +1130,9 @@ private fun SatelliteMainConnectionCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp),
                 color = when (status) {
-                    is com.flockyou.service.ScanningService.SubsystemStatus.Active ->
+                    is com.flockyou.service.SubsystemStatus.Active ->
                         Color(0xFF4CAF50).copy(alpha = 0.1f)
-                    is com.flockyou.service.ScanningService.SubsystemStatus.PermissionDenied ->
+                    is com.flockyou.service.SubsystemStatus.PermissionDenied ->
                         Color(0xFFF44336).copy(alpha = 0.1f)
                     else -> MaterialTheme.colorScheme.surfaceVariant
                 }
@@ -1143,17 +1143,17 @@ private fun SatelliteMainConnectionCard(
                 ) {
                     Icon(
                         imageVector = when (status) {
-                            is com.flockyou.service.ScanningService.SubsystemStatus.Active ->
+                            is com.flockyou.service.SubsystemStatus.Active ->
                                 Icons.Default.CheckCircle
-                            is com.flockyou.service.ScanningService.SubsystemStatus.PermissionDenied ->
+                            is com.flockyou.service.SubsystemStatus.PermissionDenied ->
                                 Icons.Default.Error
                             else -> Icons.Default.Pause
                         },
                         contentDescription = null,
                         tint = when (status) {
-                            is com.flockyou.service.ScanningService.SubsystemStatus.Active ->
+                            is com.flockyou.service.SubsystemStatus.Active ->
                                 Color(0xFF4CAF50)
-                            is com.flockyou.service.ScanningService.SubsystemStatus.PermissionDenied ->
+                            is com.flockyou.service.SubsystemStatus.PermissionDenied ->
                                 Color(0xFFF44336)
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
@@ -1162,9 +1162,9 @@ private fun SatelliteMainConnectionCard(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = when (status) {
-                            is com.flockyou.service.ScanningService.SubsystemStatus.Active ->
+                            is com.flockyou.service.SubsystemStatus.Active ->
                                 "Satellite monitoring active"
-                            is com.flockyou.service.ScanningService.SubsystemStatus.PermissionDenied ->
+                            is com.flockyou.service.SubsystemStatus.PermissionDenied ->
                                 "Permission required for monitoring"
                             else -> "Satellite monitoring paused"
                         },

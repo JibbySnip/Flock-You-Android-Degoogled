@@ -28,7 +28,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.flockyou.monitoring.GnssSatelliteMonitor
 import com.flockyou.monitoring.GnssSatelliteMonitor.*
 import com.flockyou.service.CellularMonitor
-import com.flockyou.service.ScanningService
 import com.flockyou.service.UltrasonicDetector
 import com.flockyou.service.UltrasonicDetector.*
 import kotlinx.coroutines.launch
@@ -782,7 +781,7 @@ private fun UltrasonicAnomalyCard(
 @Composable
 private fun CellularStatusContent(
     cellStatus: CellularMonitor.CellStatus?,
-    cellularStatus: ScanningService.SubsystemStatus,
+    cellularStatus: com.flockyou.service.SubsystemStatus,
     seenCellTowers: List<CellularMonitor.SeenCellTower>,
     cellularAnomalies: List<CellularMonitor.CellularAnomaly>,
     isScanning: Boolean,
@@ -800,9 +799,9 @@ private fun CellularStatusContent(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
                     containerColor = when (cellularStatus) {
-                        is ScanningService.SubsystemStatus.Active -> 
+                        is com.flockyou.service.SubsystemStatus.Active -> 
                             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                        is ScanningService.SubsystemStatus.PermissionDenied -> 
+                        is com.flockyou.service.SubsystemStatus.PermissionDenied -> 
                             MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
                         else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     }
@@ -827,16 +826,16 @@ private fun CellularStatusContent(
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = when (cellularStatus) {
-                                is ScanningService.SubsystemStatus.Active -> Color(0xFF4CAF50)
-                                is ScanningService.SubsystemStatus.PermissionDenied -> Color(0xFFF44336)
+                                is com.flockyou.service.SubsystemStatus.Active -> Color(0xFF4CAF50)
+                                is com.flockyou.service.SubsystemStatus.PermissionDenied -> Color(0xFFF44336)
                                 else -> Color(0xFF9E9E9E)
                             }
                         ) {
                             Text(
                                 text = when (cellularStatus) {
-                                    is ScanningService.SubsystemStatus.Active -> "Active"
-                                    is ScanningService.SubsystemStatus.PermissionDenied -> "No Permission"
-                                    is ScanningService.SubsystemStatus.Error -> "Error"
+                                    is com.flockyou.service.SubsystemStatus.Active -> "Active"
+                                    is com.flockyou.service.SubsystemStatus.PermissionDenied -> "No Permission"
+                                    is com.flockyou.service.SubsystemStatus.Error -> "Error"
                                     else -> "Idle"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
@@ -846,7 +845,7 @@ private fun CellularStatusContent(
                         }
                     }
                     
-                    if (cellularStatus is ScanningService.SubsystemStatus.PermissionDenied) {
+                    if (cellularStatus is com.flockyou.service.SubsystemStatus.PermissionDenied) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = "⚠️ READ_PHONE_STATE permission required for IMSI catcher detection",
@@ -1567,7 +1566,7 @@ private fun GnssAnomalyListCard(
 @Composable
 private fun SatelliteStatusContent(
     satelliteState: com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState?,
-    satelliteStatus: ScanningService.SubsystemStatus,
+    satelliteStatus: com.flockyou.service.SubsystemStatus,
     satelliteAnomalies: List<com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly>,
     isScanning: Boolean,
     onClearSatelliteHistory: () -> Unit
@@ -1585,7 +1584,7 @@ private fun SatelliteStatusContent(
                 colors = CardDefaults.cardColors(
                     containerColor = when {
                         satelliteState?.isConnected == true -> MaterialTheme.colorScheme.primaryContainer
-                        satelliteStatus is ScanningService.SubsystemStatus.Active -> MaterialTheme.colorScheme.surfaceVariant
+                        satelliteStatus is com.flockyou.service.SubsystemStatus.Active -> MaterialTheme.colorScheme.surfaceVariant
                         else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     }
                 )
@@ -1989,7 +1988,7 @@ fun StatBox(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SeenDeviceCard(
-    device: ScanningService.SeenDevice,
+    device: com.flockyou.service.SeenDevice,
     isBle: Boolean
 ) {
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }

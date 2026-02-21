@@ -258,12 +258,18 @@ fun SettingsScreen(
                             )
                         },
                         onExpandClick = { cellularExpanded = !cellularExpanded },
-                        patterns = listOf(
-                            PatternItem("imsi_catcher", "IMSI Catcher Detection", "Detect rogue base stations", true),
-                            PatternItem("cell_anomaly", "Cell Anomaly Detection", "Detect unusual cell behavior", true),
-                            PatternItem("downgrade", "Downgrade Attack", "Detect forced 2G downgrades", true)
-                        ),
-                        onPatternToggle = { _, _ -> /* TODO: Wire to ViewModel */ },
+                        patterns = com.flockyou.data.CellularPattern.values().map { pattern ->
+                            PatternItem(
+                                pattern.name,
+                                pattern.displayName,
+                                pattern.description,
+                                pattern in detectionSettings.enabledCellularPatterns
+                            )
+                        },
+                        onPatternToggle = { id, enabled ->
+                            val pattern = com.flockyou.data.CellularPattern.valueOf(id)
+                            viewModel.toggleCellularPattern(pattern, enabled)
+                        },
                         thresholdsContent = {
                             Text(
                                 text = "Signal threshold and timing settings for cellular detection",
@@ -271,7 +277,7 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         },
-                        onResetDefaults = { /* TODO: Reset cellular patterns */ }
+                        onResetDefaults = { viewModel.applyProtectionPreset(ProtectionPreset.BALANCED) }
                     )
                 }
 
@@ -287,11 +293,18 @@ fun SettingsScreen(
                             viewModel.setGlobalDetectionEnabled(satellite = enabled)
                         },
                         onExpandClick = { satelliteExpanded = !satelliteExpanded },
-                        patterns = listOf(
-                            PatternItem("ntn_threat", "NTN Threat Detection", "Detect satellite network threats", true),
-                            PatternItem("sat_anomaly", "Satellite Anomaly", "Detect unusual satellite activity", true)
-                        ),
-                        onPatternToggle = { _, _ -> /* TODO: Wire to ViewModel */ },
+                        patterns = com.flockyou.data.SatellitePattern.values().map { pattern ->
+                            PatternItem(
+                                pattern.name,
+                                pattern.displayName,
+                                pattern.description,
+                                pattern in detectionSettings.enabledSatellitePatterns
+                            )
+                        },
+                        onPatternToggle = { id, enabled ->
+                            val pattern = com.flockyou.data.SatellitePattern.valueOf(id)
+                            viewModel.toggleSatellitePattern(pattern, enabled)
+                        },
                         thresholdsContent = {
                             Text(
                                 text = "Satellite detection sensitivity settings",
@@ -299,7 +312,7 @@ fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         },
-                        onResetDefaults = { /* TODO: Reset satellite patterns */ }
+                        onResetDefaults = { viewModel.applyProtectionPreset(ProtectionPreset.BALANCED) }
                     )
                 }
 
@@ -319,13 +332,18 @@ fun SettingsScreen(
                             )
                         },
                         onExpandClick = { bleExpanded = !bleExpanded },
-                        patterns = listOf(
-                            PatternItem("airtag", "AirTag Detection", "Apple AirTag trackers", true),
-                            PatternItem("tile", "Tile Detection", "Tile tracking devices", true),
-                            PatternItem("samsung", "SmartTag Detection", "Samsung SmartTag trackers", true),
-                            PatternItem("generic_ble", "Generic BLE Trackers", "Unknown BLE trackers", true)
-                        ),
-                        onPatternToggle = { _, _ -> /* TODO: Wire to ViewModel */ },
+                        patterns = com.flockyou.data.BlePattern.values().map { pattern ->
+                            PatternItem(
+                                pattern.name,
+                                pattern.displayName,
+                                pattern.description,
+                                pattern in detectionSettings.enabledBlePatterns
+                            )
+                        },
+                        onPatternToggle = { id, enabled ->
+                            val pattern = com.flockyou.data.BlePattern.valueOf(id)
+                            viewModel.toggleBlePattern(pattern, enabled)
+                        },
                         thresholdsContent = {
                             Column {
                                 Text(
@@ -366,13 +384,18 @@ fun SettingsScreen(
                             )
                         },
                         onExpandClick = { wifiExpanded = !wifiExpanded },
-                        patterns = listOf(
-                            PatternItem("evil_twin", "Evil Twin Detection", "Detect AP impersonation", true),
-                            PatternItem("rogue_ap", "Rogue AP Detection", "Detect unauthorized APs", true),
-                            PatternItem("deauth", "Deauth Attack", "Detect deauthentication attacks", true),
-                            PatternItem("stingray_wifi", "WiFi Stingray", "Detect WiFi surveillance", true)
-                        ),
-                        onPatternToggle = { _, _ -> /* TODO: Wire to ViewModel */ },
+                        patterns = com.flockyou.data.WifiPattern.values().map { pattern ->
+                            PatternItem(
+                                pattern.name,
+                                pattern.displayName,
+                                pattern.description,
+                                pattern in detectionSettings.enabledWifiPatterns
+                            )
+                        },
+                        onPatternToggle = { id, enabled ->
+                            val pattern = com.flockyou.data.WifiPattern.valueOf(id)
+                            viewModel.toggleWifiPattern(pattern, enabled)
+                        },
                         thresholdsContent = {
                             Column {
                                 Text(
@@ -1093,7 +1116,7 @@ fun StatRow(
 }
 
 @Composable
-fun LogEntryCard(error: ScanningService.ScanError) {
+fun LogEntryCard(error: com.flockyou.service.ScanError) {
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
     
     Card(

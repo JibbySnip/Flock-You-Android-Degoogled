@@ -29,7 +29,7 @@ import java.util.UUID
  */
 class RogueWifiMonitor(
     private val context: Context,
-    private val errorCallback: ScanningService.DetectorCallback? = null
+    private val errorCallback: DetectorCallback? = null
 ) {
     // Minimum distance traveled (in meters) before reporting a tracking device
     // Default: 1609 meters (1 mile) - can be configured via settings
@@ -603,11 +603,11 @@ class RogueWifiMonitor(
 
         try {
             registerReceivers()
-            errorCallback?.onDetectorStarted(ScanningService.DetectorHealthStatus.DETECTOR_ROGUE_WIFI)
+            errorCallback?.onDetectorStarted(DetectorHealthStatus.DETECTOR_ROGUE_WIFI)
         } catch (e: Exception) {
             Log.e(TAG, "Error starting rogue WiFi monitoring", e)
             errorCallback?.onError(
-                ScanningService.DetectorHealthStatus.DETECTOR_ROGUE_WIFI,
+                DetectorHealthStatus.DETECTOR_ROGUE_WIFI,
                 "Failed to register receivers: ${e.message}",
                 recoverable = true
             )
@@ -628,7 +628,7 @@ class RogueWifiMonitor(
             description = "WiFi surveillance detection paused"
         )
 
-        errorCallback?.onDetectorStopped(ScanningService.DetectorHealthStatus.DETECTOR_ROGUE_WIFI)
+        errorCallback?.onDetectorStopped(DetectorHealthStatus.DETECTOR_ROGUE_WIFI)
         Log.d(TAG, "Stopped rogue WiFi monitoring")
     }
 
@@ -645,11 +645,11 @@ class RogueWifiMonitor(
 
         try {
             processScanResultsInternal(results)
-            errorCallback?.onScanSuccess(ScanningService.DetectorHealthStatus.DETECTOR_ROGUE_WIFI)
+            errorCallback?.onScanSuccess(DetectorHealthStatus.DETECTOR_ROGUE_WIFI)
         } catch (e: Exception) {
             Log.e(TAG, "Error processing WiFi scan results", e)
             errorCallback?.onError(
-                ScanningService.DetectorHealthStatus.DETECTOR_ROGUE_WIFI,
+                DetectorHealthStatus.DETECTOR_ROGUE_WIFI,
                 "Scan processing error: ${e.message}",
                 recoverable = true
             )

@@ -8,6 +8,7 @@ import com.flockyou.data.model.DetectionMethod
 import com.flockyou.data.model.DetectionPattern
 import com.flockyou.data.model.DetectionPatterns
 import com.flockyou.data.model.DetectionProtocol
+import com.flockyou.detection.config.DetectionConstants
 import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.ThreatLevel
 import com.flockyou.data.model.rssiToDistance
@@ -66,64 +67,30 @@ class BleDetectionHandler @Inject constructor(
     companion object {
         private const val TAG = "BleDetectionHandler"
 
-        // ==================== THRESHOLD CONFIGURATION ====================
+        // ==================== CENTRALIZED CONSTANTS (see DetectionConstants) ====================
+        // Thresholds and timing constants are defined in DetectionConstants.Common and
+        // DetectionConstants.Ble. Local aliases are provided for backward compatibility.
 
-        /** Minimum RSSI for detection consideration (-100 dBm = very weak, -30 dBm = very strong) */
-        const val DEFAULT_RSSI_THRESHOLD = -90
+        const val DEFAULT_RSSI_THRESHOLD = DetectionConstants.Common.DEFAULT_RSSI_THRESHOLD
+        const val STRONG_SIGNAL_RSSI = DetectionConstants.Common.STRONG_SIGNAL_RSSI
+        const val IMMEDIATE_PROXIMITY_RSSI = DetectionConstants.Common.IMMEDIATE_PROXIMITY_RSSI
+        const val DETECTION_RATE_LIMIT_MS = DetectionConstants.Common.DETECTION_RATE_LIMIT_MS
 
-        /** Strong signal threshold for proximity alerts */
-        const val STRONG_SIGNAL_RSSI = -50
+        const val ADVERTISING_RATE_SPIKE_THRESHOLD = DetectionConstants.Ble.ADVERTISING_RATE_SPIKE_THRESHOLD
+        const val NORMAL_ADVERTISING_RATE = DetectionConstants.Ble.NORMAL_ADVERTISING_RATE
+        const val RATE_CALCULATION_WINDOW_MS = DetectionConstants.Ble.RATE_CALCULATION_WINDOW_MS
 
-        /** Very close proximity threshold */
-        const val IMMEDIATE_PROXIMITY_RSSI = -40
+        const val MANUFACTURER_ID_APPLE = DetectionConstants.Ble.MANUFACTURER_ID_APPLE
+        const val MANUFACTURER_ID_NORDIC = DetectionConstants.Ble.MANUFACTURER_ID_NORDIC
+        const val MANUFACTURER_ID_SAMSUNG = DetectionConstants.Ble.MANUFACTURER_ID_SAMSUNG
+        const val MANUFACTURER_ID_TILE = DetectionConstants.Ble.MANUFACTURER_ID_TILE
+        const val MANUFACTURER_ID_GOOGLE = DetectionConstants.Ble.MANUFACTURER_ID_GOOGLE
 
-        /** Advertising rate threshold for Signal trigger detection (packets per second) */
-        const val ADVERTISING_RATE_SPIKE_THRESHOLD = 20f
-
-        /** Normal advertising rate for most BLE devices (packets per second) */
-        const val NORMAL_ADVERTISING_RATE = 1f
-
-        /** Time window for rate calculation (milliseconds) */
-        const val RATE_CALCULATION_WINDOW_MS = 5000L
-
-        /** Rate limit between detections of the same device (milliseconds) */
-        const val DETECTION_RATE_LIMIT_MS = 30000L
-
-        // ==================== MANUFACTURER IDS ====================
-
-        /** Apple manufacturer ID (used in AirTags and as BLE wrapper) */
-        const val MANUFACTURER_ID_APPLE = 0x004C
-
-        /** Nordic Semiconductor manufacturer ID (used in Axon devices) */
-        const val MANUFACTURER_ID_NORDIC = 0x0059
-
-        /** Samsung manufacturer ID */
-        const val MANUFACTURER_ID_SAMSUNG = 0x0075
-
-        /** Tile manufacturer ID */
-        const val MANUFACTURER_ID_TILE = 0x00C7
-
-        /** Google manufacturer ID (used in Fast Pair) */
-        const val MANUFACTURER_ID_GOOGLE = 0x00E0
-
-        // ==================== FLIPPER ZERO BLE SPAM DETECTION ====================
-        // Thresholds tuned to reduce false positives in busy BLE environments
-        // (malls, airports, conferences, etc.)
-
-        /** Time window for BLE spam detection (milliseconds) - extended to reduce transient triggers */
-        const val BLE_SPAM_DETECTION_WINDOW_MS = 20_000L  // Was 10s, now 20s
-
-        /** Threshold for Apple device advertisements in spam window to trigger spam detection */
-        const val APPLE_SPAM_THRESHOLD = 30  // Was 15 - raised to account for busy environments
-
-        /** Threshold for Fast Pair advertisements in spam window to trigger spam detection */
-        const val FAST_PAIR_SPAM_THRESHOLD = 25  // Was 10 - raised to account for busy environments
-
-        /** Threshold for unique device names in spam window (rapid name changing) */
-        const val DEVICE_NAME_CHANGE_THRESHOLD = 12  // Was 8 - raised to reduce false positives
-
-        /** Minimum threat score to trigger spam detection */
-        const val SPAM_THREAT_SCORE_THRESHOLD = 70  // Raised from implicit 60
+        const val BLE_SPAM_DETECTION_WINDOW_MS = DetectionConstants.Ble.BLE_SPAM_DETECTION_WINDOW_MS
+        const val APPLE_SPAM_THRESHOLD = DetectionConstants.Ble.APPLE_SPAM_THRESHOLD
+        const val FAST_PAIR_SPAM_THRESHOLD = DetectionConstants.Ble.FAST_PAIR_SPAM_THRESHOLD
+        const val DEVICE_NAME_CHANGE_THRESHOLD = DetectionConstants.Ble.DEVICE_NAME_CHANGE_THRESHOLD
+        const val SPAM_THREAT_SCORE_THRESHOLD = DetectionConstants.Ble.SPAM_THREAT_SCORE_THRESHOLD
 
         /** Google Fast Pair service UUID */
         val UUID_GOOGLE_FAST_PAIR: UUID = UUID.fromString("0000FE2C-0000-1000-8000-00805F9B34FB")

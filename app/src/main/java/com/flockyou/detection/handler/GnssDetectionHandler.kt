@@ -6,6 +6,7 @@ import com.flockyou.ai.PromptTemplates
 import com.flockyou.data.model.Detection
 import com.flockyou.data.model.DetectionMethod
 import com.flockyou.data.model.DetectionProtocol
+import com.flockyou.detection.config.DetectionConstants
 import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.SignalStrength
 import com.flockyou.data.model.ThreatLevel
@@ -136,31 +137,25 @@ class GnssDetectionHandler @Inject constructor() {
     companion object {
         private const val TAG = "GnssDetectionHandler"
 
-        // Detection thresholds - set high to eliminate false positives
-        private const val SPOOFING_HIGH_THRESHOLD = 85f
-        private const val SPOOFING_MEDIUM_THRESHOLD = 75f
-        private const val JAMMING_HIGH_THRESHOLD = 85f
-        private const val JAMMING_MEDIUM_THRESHOLD = 75f
+        // All GNSS thresholds centralized in DetectionConstants.Gnss
+        private const val SPOOFING_HIGH_THRESHOLD = DetectionConstants.Gnss.SPOOFING_HIGH_THRESHOLD
+        private const val SPOOFING_MEDIUM_THRESHOLD = DetectionConstants.Gnss.SPOOFING_MEDIUM_THRESHOLD
+        private const val JAMMING_HIGH_THRESHOLD = DetectionConstants.Gnss.JAMMING_HIGH_THRESHOLD
+        private const val JAMMING_MEDIUM_THRESHOLD = DetectionConstants.Gnss.JAMMING_MEDIUM_THRESHOLD
 
-        // C/N0 thresholds - calibrated based on real-world GNSS behavior
-        // Normal GNSS signals have variance of 0.5-5.0 due to different elevation angles,
-        // atmospheric conditions, multipath, etc. Only extremely low variance is suspicious.
-        private const val CN0_VARIANCE_SUSPICIOUS = 0.15  // dB-Hz - ONLY this low indicates spoofing
-        private const val CN0_VARIANCE_WARNING = 0.5  // dB-Hz - low, but only flag with other indicators
-        private const val CN0_DEVIATION_SIGNIFICANT = 3.0  // standard deviations from baseline
+        private const val CN0_VARIANCE_SUSPICIOUS = DetectionConstants.Gnss.CN0_VARIANCE_SUSPICIOUS
+        private const val CN0_VARIANCE_WARNING = DetectionConstants.Gnss.CN0_VARIANCE_WARNING
+        private const val CN0_DEVIATION_SIGNIFICANT = DetectionConstants.Gnss.CN0_DEVIATION_SIGNIFICANT
 
-        // Geometry thresholds
-        private const val GEOMETRY_POOR_THRESHOLD = 0.4f
-        private const val LOW_ELEV_HIGH_SIGNAL_THRESHOLD = 2
+        private const val GEOMETRY_POOR_THRESHOLD = DetectionConstants.Gnss.GEOMETRY_POOR_THRESHOLD
+        private const val LOW_ELEV_HIGH_SIGNAL_THRESHOLD = DetectionConstants.Gnss.LOW_ELEV_HIGH_SIGNAL_THRESHOLD
 
-        // Clock drift thresholds
-        private const val DRIFT_JUMP_SUSPICIOUS = 3
-        private const val DRIFT_CUMULATIVE_SUSPICIOUS_MS = 10  // milliseconds
+        private const val DRIFT_JUMP_SUSPICIOUS = DetectionConstants.Gnss.DRIFT_JUMP_SUSPICIOUS
+        private const val DRIFT_CUMULATIVE_SUSPICIOUS_MS = DetectionConstants.Gnss.DRIFT_CUMULATIVE_SUSPICIOUS_MS
 
-        // Satellite count thresholds - for jamming/spoofing plausibility
-        private const val GOOD_FIX_SATELLITES = 10
-        private const val STRONG_FIX_SATELLITES = 30
-        private const val JAMMING_MAX_SATELLITES = 8  // Can't claim jamming with more than this
+        private const val GOOD_FIX_SATELLITES = DetectionConstants.Gnss.GOOD_FIX_SATELLITES
+        private const val STRONG_FIX_SATELLITES = DetectionConstants.Gnss.STRONG_FIX_SATELLITES
+        private const val JAMMING_MAX_SATELLITES = DetectionConstants.Gnss.JAMMING_MAX_SATELLITES
     }
 
     // ==================== USER CONFIRMATION GUIDANCE ====================

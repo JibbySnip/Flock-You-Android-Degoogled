@@ -32,7 +32,7 @@ import java.util.UUID
  */
 class RfSignalAnalyzer(
     private val context: Context,
-    private val errorCallback: ScanningService.DetectorCallback? = null
+    private val errorCallback: DetectorCallback? = null
 ) {
     // Setting to control hidden network RF anomaly detection (disabled by default).
     // Note: This is conceptually a WiFi feature (analyzes hidden WiFi SSIDs) placed in
@@ -367,7 +367,7 @@ class RfSignalAnalyzer(
             description = "Monitoring for jammers, drones, and RF anomalies"
         )
 
-        errorCallback?.onDetectorStarted(ScanningService.DetectorHealthStatus.DETECTOR_RF_SIGNAL)
+        errorCallback?.onDetectorStarted(DetectorHealthStatus.DETECTOR_RF_SIGNAL)
     }
 
     fun stopMonitoring() {
@@ -379,7 +379,7 @@ class RfSignalAnalyzer(
             description = "RF surveillance detection paused"
         )
 
-        errorCallback?.onDetectorStopped(ScanningService.DetectorHealthStatus.DETECTOR_RF_SIGNAL)
+        errorCallback?.onDetectorStopped(DetectorHealthStatus.DETECTOR_RF_SIGNAL)
         Log.d(TAG, "Stopped RF signal analysis")
     }
 
@@ -396,11 +396,11 @@ class RfSignalAnalyzer(
 
         try {
             analyzeWifiScanInternal(results)
-            errorCallback?.onScanSuccess(ScanningService.DetectorHealthStatus.DETECTOR_RF_SIGNAL)
+            errorCallback?.onScanSuccess(DetectorHealthStatus.DETECTOR_RF_SIGNAL)
         } catch (e: Exception) {
             Log.e(TAG, "Error analyzing RF environment", e)
             errorCallback?.onError(
-                ScanningService.DetectorHealthStatus.DETECTOR_RF_SIGNAL,
+                DetectorHealthStatus.DETECTOR_RF_SIGNAL,
                 "Analysis error: ${e.message}",
                 recoverable = true
             )

@@ -423,64 +423,10 @@ fun calculateThreatLevel(
 
 /**
  * Get impact factor for a device type.
- * Higher impact = more potential harm if threat is real.
+ * Delegates to the single authoritative source in ImpactFactors.
  */
-private fun getImpactFactorForDeviceType(deviceType: DeviceType): Double = when (deviceType) {
-    // Maximum impact - intercepts all communications
-    DeviceType.STINGRAY_IMSI -> 2.0
-    DeviceType.CELLEBRITE_FORENSICS -> 2.0
-    DeviceType.GRAYKEY_DEVICE -> 2.0
-    DeviceType.MAN_IN_MIDDLE -> 2.0
-
-    // High impact - can cause physical harm
-    DeviceType.GNSS_SPOOFER -> 1.8
-    DeviceType.GNSS_JAMMER -> 1.8
-    DeviceType.RF_JAMMER -> 1.8
-    DeviceType.WIFI_PINEAPPLE -> 1.8
-    DeviceType.ROGUE_AP -> 1.7
-
-    // Hacking tools - context-dependent impact
-    DeviceType.FLIPPER_ZERO -> 1.5  // Can be legitimate or malicious
-    DeviceType.FLIPPER_ZERO_SPAM -> 1.9  // Active attack
-    DeviceType.HACKRF_SDR -> 1.6
-    DeviceType.PROXMARK -> 1.7  // RFID cloning capability
-    DeviceType.BASH_BUNNY -> 1.8
-    DeviceType.LAN_TURTLE -> 1.7
-    DeviceType.USB_RUBBER_DUCKY -> 1.8
-    DeviceType.KEYCROC -> 1.8
-    DeviceType.SHARK_JACK -> 1.7
-    DeviceType.SCREEN_CRAB -> 1.6
-    DeviceType.GENERIC_HACKING_TOOL -> 1.5
-
-    // Tracking/stalking concern
-    DeviceType.AIRTAG -> 1.5
-    DeviceType.TILE_TRACKER -> 1.5
-    DeviceType.SAMSUNG_SMARTTAG -> 1.5
-    DeviceType.GENERIC_BLE_TRACKER -> 1.5
-    DeviceType.TRACKING_DEVICE -> 1.5
-
-    // Privacy violations
-    DeviceType.HIDDEN_CAMERA -> 1.3
-    DeviceType.HIDDEN_TRANSMITTER -> 1.3
-    DeviceType.FLOCK_SAFETY_CAMERA -> 1.2
-    DeviceType.LICENSE_PLATE_READER -> 1.2
-    DeviceType.FACIAL_RECOGNITION -> 1.2
-
-    // Consumer IoT - lower impact
-    DeviceType.RING_DOORBELL -> 0.8
-    DeviceType.NEST_CAMERA -> 0.8
-    DeviceType.WYZE_CAMERA -> 0.8
-    DeviceType.AMAZON_SIDEWALK -> 0.7
-
-    // Traffic infrastructure - minimal impact
-    DeviceType.SPEED_CAMERA -> 0.6
-    DeviceType.RED_LIGHT_CAMERA -> 0.6
-    DeviceType.TOLL_READER -> 0.6
-    DeviceType.TRAFFIC_SENSOR -> 0.5
-
-    // Default for unknown types
-    else -> 1.0
-}
+private fun getImpactFactorForDeviceType(deviceType: DeviceType): Double =
+    com.flockyou.detection.ImpactFactors.get(deviceType)
 
 /**
  * Get estimated distance from RSSI
