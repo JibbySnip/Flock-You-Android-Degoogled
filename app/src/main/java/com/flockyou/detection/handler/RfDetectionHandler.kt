@@ -15,6 +15,67 @@ import javax.inject.Singleton
  * Handles all RF-based detection methods by analyzing WiFi scan results
  * for anomalies that indicate surveillance, jamming, or covert activity.
  *
+ * ## Important: Detection Feasibility & Hardware Requirements
+ *
+ * This handler operates primarily on **WiFi scan data as a proxy** for RF
+ * environment analysis. Android does not provide direct access to the RF
+ * spectrum. True RF spectrum analysis requires external SDR hardware
+ * (Flipper Zero, HackRF, RTL-SDR, etc.).
+ *
+ * ### Detection Methods and Their Feasibility:
+ *
+ * **WiFi-proxy detections (no extra hardware needed):**
+ * - RF_JAMMER: INDIRECT ONLY. Inferred from sustained WiFi signal loss.
+ *   Cannot distinguish between true RF jamming and other causes of signal
+ *   loss (building entry, antenna occlusion, AP reboots, congestion).
+ *   Requires consecutive anomalous readings to reduce false positives.
+ *
+ * - RF_DRONE: Reasonable but LIMITED. Detects drone controllers that emit
+ *   WiFi signals, matched via MAC OUI prefix (DJI, Parrot, Skydio, etc.)
+ *   and SSID patterns. Cannot detect drones using proprietary RF protocols
+ *   (e.g., DJI OcuSync direct link, analog FPV). Detection is limited to
+ *   controllers/drones that create WiFi access points.
+ *
+ * - RF_SURVEILLANCE_AREA: Detects high concentration of surveillance camera
+ *   WiFi networks via OUI matching (Hikvision, Dahua, Axis, etc.). HIGH
+ *   FALSE POSITIVE RATE in commercial/urban areas where IP cameras are
+ *   ubiquitous. A shopping mall or office building will routinely trigger
+ *   this. The threshold (5+ cameras) attempts to filter, but urban FPs
+ *   remain a significant issue.
+ *
+ * - RF_UNUSUAL_ACTIVITY: Detects abnormal hidden network density. Based on
+ *   WiFi hidden SSID analysis. Can be useful for detecting coordinated
+ *   covert WiFi deployments. High FP rate in apartment buildings and dense
+ *   urban areas where many APs use hidden SSIDs by default.
+ *
+ * - RF_INTERFERENCE: Detects sustained changes in RF environment via WiFi
+ *   signal statistics. Very indirect and LOW confidence. Environmental
+ *   changes (weather, moving between indoor/outdoor) commonly trigger this.
+ *
+ * - RF_HIDDEN_TRANSMITTER: Detects clusters of strong hidden WiFi networks
+ *   with similar signal characteristics. Inferred from WiFi data only --
+ *   cannot detect non-WiFi hidden transmitters (bugs, body wires, covert
+ *   radios). Despite the name, this is really "hidden WiFi network cluster
+ *   detection," not true hidden transmitter sweeping.
+ *
+ * **Detections that REQUIRE external hardware (infeasible without SDR):**
+ * - RF_SPECTRUM_ANOMALY: True spectrum analysis requires SDR hardware.
+ *   Without it, this can only report WiFi-derived signal statistics, which
+ *   are a very poor proxy for actual spectrum anomalies.
+ *
+ * - Sub-GHz detection (315/433/868/915 MHz): IMPOSSIBLE without Flipper
+ *   Zero or other SDR hardware. Android has no access to sub-GHz spectrum.
+ *
+ * - True RF sweep for hidden transmitters: IMPOSSIBLE. Requires wideband
+ *   receiver hardware to detect non-WiFi/non-BLE transmitters.
+ *
+ * ### enableHiddenNetworkRfAnomaly Setting:
+ * This is conceptually a WiFi feature (analyzing hidden WiFi SSIDs) that is
+ * placed in the RF handler because hidden networks are treated as an RF
+ * environment indicator. Consider refactoring this to WifiDetectionHandler
+ * in a future release, as it operates entirely on WiFi scan data and has
+ * no dependency on actual RF spectrum access.
+ *
  * Detection Methods Supported:
  * - RF_JAMMER: Sudden signal drop indicating active jamming
  * - RF_DRONE: Drone WiFi patterns (DJI, Parrot, etc.)
@@ -447,16 +508,26 @@ class RfDetectionHandler @Inject constructor() {
     ): List<Detection> {
         val detections = mutableListOf<Detection>()
 
-        // Analyze for hidden network density
+        // WiFi-proxy detection: Hidden network density analysis.
+        // Feasibility: Operates on WiFi hidden SSIDs. High FP in apartments/offices.
+        // Note: enableHiddenNetworkRfAnomaly is a WiFi feature misplaced in RF --
+        // consider refactoring to WifiDetectionHandler in a future release.
         analyzeHiddenNetworkDensity(results, context)?.let { detections.add(it) }
 
-        // Analyze for surveillance camera concentration
+        // WiFi-proxy detection: Camera OUI concentration.
+        // Feasibility: Reasonable in residential areas but HIGH FALSE POSITIVE rate
+        // in commercial/urban areas where IP cameras (Hikvision, Dahua, etc.) are common.
         analyzeSurveillanceCameraConcentration(results, context)?.let { detections.add(it) }
 
-        // Analyze for drone signals
+        // WiFi-proxy detection: Drone WiFi pattern matching.
+        // Feasibility: Only detects drones whose controllers emit WiFi (DJI, Parrot, etc.).
+        // Cannot detect drones using proprietary RF protocols or analog FPV.
         detections.addAll(analyzeDroneSignals(results, context))
 
-        // Analyze for hidden transmitters
+        // WiFi-proxy detection: Clusters of strong hidden WiFi networks.
+        // Feasibility: Detects hidden WiFi only. Cannot detect non-WiFi hidden
+        // transmitters (RF bugs, body wires). Naming is misleading -- this is really
+        // "hidden WiFi cluster detection," not a true RF sweep for hidden transmitters.
         analyzeHiddenTransmitters(results, context)?.let { detections.add(it) }
 
         return detections

@@ -84,6 +84,45 @@ enum class ProtectionPreset(
     }
 
     /**
+     * Returns the set of GNSS patterns that should be enabled for this preset.
+     */
+    fun getEnabledGnssPatterns(): Set<GnssPattern> = when (this) {
+        ESSENTIAL -> setOf(
+            GnssPattern.SPOOFING,       // Critical: GPS spoofing detection
+            GnssPattern.JAMMING         // Critical: GPS jamming detection
+        )
+        BALANCED -> GnssPattern.values().filter { it.defaultEnabled }.toSet()
+        PARANOID -> GnssPattern.values().toSet()
+        CUSTOM -> GnssPattern.values().filter { it.defaultEnabled }.toSet()
+    }
+
+    /**
+     * Returns the set of RF patterns that should be enabled for this preset.
+     */
+    fun getEnabledRfPatterns(): Set<RfPattern> = when (this) {
+        ESSENTIAL -> setOf(
+            RfPattern.JAMMER,           // Critical: RF jammer detection
+            RfPattern.DRONE             // Critical: Surveillance drone detection
+        )
+        BALANCED -> RfPattern.values().filter { it.defaultEnabled }.toSet()
+        PARANOID -> RfPattern.values().toSet()
+        CUSTOM -> RfPattern.values().filter { it.defaultEnabled }.toSet()
+    }
+
+    /**
+     * Returns the set of Ultrasonic patterns that should be enabled for this preset.
+     */
+    fun getEnabledUltrasonicPatterns(): Set<UltrasonicPattern> = when (this) {
+        ESSENTIAL -> setOf(
+            UltrasonicPattern.AD_TRACKING,        // Critical: Ad tracking beacons
+            UltrasonicPattern.CROSS_DEVICE_LINKING // Critical: Cross-device tracking
+        )
+        BALANCED -> UltrasonicPattern.values().filter { it.defaultEnabled }.toSet()
+        PARANOID -> UltrasonicPattern.values().toSet()
+        CUSTOM -> UltrasonicPattern.values().filter { it.defaultEnabled }.toSet()
+    }
+
+    /**
      * Returns a threshold multiplier for this preset.
      * ESSENTIAL = 1.5 (conservative/less sensitive, fewer false positives)
      * BALANCED = 1.0 (default thresholds)
@@ -183,6 +222,70 @@ enum class ProtectionPreset(
     }
 
     /**
+     * Returns adjusted GNSS thresholds for this preset.
+     */
+    fun getGnssThresholds(): GnssThresholds {
+        val multiplier = getThresholdMultiplier()
+        val default = GnssThresholds()
+        return GnssThresholds(
+            cn0DeviationThreshold = default.cn0DeviationThreshold * multiplier,
+            clockDriftThreshold = default.clockDriftThreshold * multiplier,
+            minSatellites = default.minSatellites, // Keep same
+            positionJumpThreshold = default.positionJumpThreshold * multiplier
+        )
+    }
+
+    /**
+     * Returns adjusted RF thresholds for this preset.
+     */
+    fun getRfThresholds(): RfThresholds {
+        val multiplier = getThresholdMultiplier()
+        val default = RfThresholds()
+        return RfThresholds(
+            hiddenNetworkThreshold = (default.hiddenNetworkThreshold * multiplier).toInt().coerceAtLeast(1),
+            jammerDetectionThreshold = (default.jammerDetectionThreshold * multiplier).toInt().coerceAtLeast(5),
+            subGhzFrequencies = default.subGhzFrequencies // Keep same
+        )
+    }
+
+    /**
+     * Returns adjusted Ultrasonic thresholds for this preset.
+     */
+    fun getUltrasonicThresholds(): UltrasonicThresholds {
+        val default = UltrasonicThresholds()
+        val amplitudeAdjustment = when (this) {
+            PARANOID -> 5.0   // More sensitive: higher amplitude (less negative)
+            ESSENTIAL -> -5.0 // Less sensitive: lower amplitude (more negative)
+            else -> 0.0
+        }
+        return UltrasonicThresholds(
+            minAmplitude = (default.minAmplitude + amplitudeAdjustment).coerceIn(-50.0, -20.0),
+            frequencyRangeStart = default.frequencyRangeStart, // Keep same
+            frequencyRangeEnd = default.frequencyRangeEnd      // Keep same
+        )
+    }
+
+    /**
+     * Returns whether GNSS detection should be enabled for this preset.
+     */
+    fun getEnableGnssDetection(): Boolean = when (this) {
+        ESSENTIAL -> false  // High false positive rate
+        BALANCED -> false   // High false positive rate
+        PARANOID -> true    // Enable everything
+        CUSTOM -> false     // Default off
+    }
+
+    /**
+     * Returns whether RF detection should be enabled for this preset.
+     */
+    fun getEnableRfDetection(): Boolean = when (this) {
+        ESSENTIAL -> false  // Requires special hardware
+        BALANCED -> false   // Requires special hardware
+        PARANOID -> true    // Enable everything
+        CUSTOM -> false     // Default
+    }
+
+    /**
      * Returns whether hidden network RF anomaly detection should be enabled for this preset.
      */
     fun getEnableHiddenNetworkRfAnomaly(): Boolean = when (this) {
@@ -216,6 +319,9 @@ enum class ProtectionPreset(
                     settings.enabledSatellitePatterns == preset.getEnabledSatellitePatterns() &&
                     settings.enabledBlePatterns == preset.getEnabledBlePatterns() &&
                     settings.enabledWifiPatterns == preset.getEnabledWifiPatterns() &&
+                    settings.enabledGnssPatterns == preset.getEnabledGnssPatterns() &&
+                    settings.enabledRfPatterns == preset.getEnabledRfPatterns() &&
+                    settings.enabledUltrasonicPatterns == preset.getEnabledUltrasonicPatterns() &&
                     settings.enableHiddenNetworkRfAnomaly == preset.getEnableHiddenNetworkRfAnomaly()
         }
     }

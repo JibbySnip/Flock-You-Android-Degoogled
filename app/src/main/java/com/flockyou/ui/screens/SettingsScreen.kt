@@ -104,6 +104,9 @@ fun SettingsScreen(
     val enableWifi by remember(detectionSettings) { mutableStateOf(detectionSettings.enableWifiDetection) }
     val enableCellular by remember(detectionSettings) { mutableStateOf(detectionSettings.enableCellularDetection) }
     val enableSatellite by remember(detectionSettings) { mutableStateOf(detectionSettings.enableSatelliteDetection) }
+    val enableGnss by remember(detectionSettings) { mutableStateOf(detectionSettings.enableGnssDetection) }
+    val enableRf by remember(detectionSettings) { mutableStateOf(detectionSettings.enableRfDetection) }
+    val enableUltrasonic by remember(detectionSettings) { mutableStateOf(detectionSettings.enableUltrasonicDetection) }
 
     // Section expansion states
     var detectionExpanded by remember { mutableStateOf(true) }
@@ -118,6 +121,9 @@ fun SettingsScreen(
     var satelliteExpanded by remember { mutableStateOf(false) }
     var bleExpanded by remember { mutableStateOf(false) }
     var wifiExpanded by remember { mutableStateOf(false) }
+    var gnssExpanded by remember { mutableStateOf(false) }
+    var rfExpanded by remember { mutableStateOf(false) }
+    var ultrasonicExpanded by remember { mutableStateOf(false) }
 
     // Protection preset state - derived from persisted detectionSettings
     val currentPreset by remember(detectionSettings) { mutableStateOf(detectionSettings.currentPreset) }
@@ -182,7 +188,10 @@ fun SettingsScreen(
                     activePatternCount = detectionSettings.enabledBlePatterns.size +
                             detectionSettings.enabledWifiPatterns.size +
                             detectionSettings.enabledCellularPatterns.size +
-                            detectionSettings.enabledSatellitePatterns.size,
+                            detectionSettings.enabledSatellitePatterns.size +
+                            detectionSettings.enabledGnssPatterns.size +
+                            detectionSettings.enabledRfPatterns.size +
+                            detectionSettings.enabledUltrasonicPatterns.size,
                     isScanning = uiState.isScanning
                 )
             }
@@ -390,6 +399,111 @@ fun SettingsScreen(
                             }
                         },
                         onResetDefaults = { wifiInterval = 35 }
+                    )
+                }
+
+                // GNSS Category Card
+                item {
+                    DetectionCategoryCard(
+                        category = DetectionCategory.GNSS,
+                        categoryEnabled = enableGnss,
+                        enabledPatternCount = detectionSettings.enabledGnssPatterns.size,
+                        totalPatternCount = com.flockyou.data.GnssPattern.values().size,
+                        expanded = gnssExpanded,
+                        onCategoryToggle = { enabled ->
+                            viewModel.setGlobalDetectionEnabled(gnss = enabled)
+                        },
+                        onExpandClick = { gnssExpanded = !gnssExpanded },
+                        patterns = com.flockyou.data.GnssPattern.values().map { pattern ->
+                            PatternItem(
+                                pattern.name,
+                                pattern.displayName,
+                                pattern.description,
+                                pattern in detectionSettings.enabledGnssPatterns
+                            )
+                        },
+                        onPatternToggle = { id, enabled ->
+                            val pattern = com.flockyou.data.GnssPattern.valueOf(id)
+                            viewModel.toggleGnssPattern(pattern, enabled)
+                        },
+                        thresholdsContent = {
+                            Text(
+                                text = "GPS spoofing and jamming detection thresholds",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        onResetDefaults = { /* Reset via preset */ }
+                    )
+                }
+
+                // RF Category Card
+                item {
+                    DetectionCategoryCard(
+                        category = DetectionCategory.RF,
+                        categoryEnabled = enableRf,
+                        enabledPatternCount = detectionSettings.enabledRfPatterns.size,
+                        totalPatternCount = com.flockyou.data.RfPattern.values().size,
+                        expanded = rfExpanded,
+                        onCategoryToggle = { enabled ->
+                            viewModel.setGlobalDetectionEnabled(rf = enabled)
+                        },
+                        onExpandClick = { rfExpanded = !rfExpanded },
+                        patterns = com.flockyou.data.RfPattern.values().map { pattern ->
+                            PatternItem(
+                                pattern.name,
+                                pattern.displayName,
+                                pattern.description,
+                                pattern in detectionSettings.enabledRfPatterns
+                            )
+                        },
+                        onPatternToggle = { id, enabled ->
+                            val pattern = com.flockyou.data.RfPattern.valueOf(id)
+                            viewModel.toggleRfPattern(pattern, enabled)
+                        },
+                        thresholdsContent = {
+                            Text(
+                                text = "RF jammer and drone detection thresholds",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        onResetDefaults = { /* Reset via preset */ }
+                    )
+                }
+
+                // Ultrasonic Category Card
+                item {
+                    DetectionCategoryCard(
+                        category = DetectionCategory.AUDIO,
+                        categoryEnabled = enableUltrasonic,
+                        enabledPatternCount = detectionSettings.enabledUltrasonicPatterns.size,
+                        totalPatternCount = com.flockyou.data.UltrasonicPattern.values().size,
+                        expanded = ultrasonicExpanded,
+                        onCategoryToggle = { enabled ->
+                            viewModel.setGlobalDetectionEnabled(ultrasonic = enabled)
+                        },
+                        onExpandClick = { ultrasonicExpanded = !ultrasonicExpanded },
+                        patterns = com.flockyou.data.UltrasonicPattern.values().map { pattern ->
+                            PatternItem(
+                                pattern.name,
+                                pattern.displayName,
+                                pattern.description,
+                                pattern in detectionSettings.enabledUltrasonicPatterns
+                            )
+                        },
+                        onPatternToggle = { id, enabled ->
+                            val pattern = com.flockyou.data.UltrasonicPattern.valueOf(id)
+                            viewModel.toggleUltrasonicPattern(pattern, enabled)
+                        },
+                        thresholdsContent = {
+                            Text(
+                                text = "Ultrasonic beacon detection thresholds",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        onResetDefaults = { /* Reset via preset */ }
                     )
                 }
 

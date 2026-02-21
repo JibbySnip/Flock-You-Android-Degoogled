@@ -2885,6 +2885,9 @@ enum class AnomalyCategory(
 
 private fun getAnomalyCategory(type: SatelliteAnomalyType): AnomalyCategory {
     return when (type) {
+        // Informational
+        SatelliteAnomalyType.SATELLITE_SWITCHOVER -> AnomalyCategory.CORE
+
         // Timing & Latency
         SatelliteAnomalyType.RTT_ORBIT_MISMATCH,
         SatelliteAnomalyType.DOPPLER_SHIFT_MISMATCH,
@@ -3000,6 +3003,9 @@ private fun getAnomalyCategory(type: SatelliteAnomalyType): AnomalyCategory {
 
 private fun formatAnomalyType(type: SatelliteAnomalyType): String {
     return when (type) {
+        // Informational
+        SatelliteAnomalyType.SATELLITE_SWITCHOVER -> "Satellite Switchover"
+
         // Core anomaly types
         SatelliteAnomalyType.UNEXPECTED_SATELLITE_CONNECTION -> "Unexpected Satellite"
         SatelliteAnomalyType.FORCED_SATELLITE_HANDOFF -> "Forced Handoff"

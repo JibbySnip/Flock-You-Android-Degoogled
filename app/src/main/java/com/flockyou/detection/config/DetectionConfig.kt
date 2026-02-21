@@ -25,6 +25,132 @@ private val Context.detectionConfigDataStore: DataStore<Preferences> by preferen
 // Core Configuration Classes
 // ============================================================================
 
+// ============================================================================
+// DUAL CONFIG SYSTEM AUDIT
+// ============================================================================
+//
+// WARNING: This file (DetectionConfig / "detection_config_v2" DataStore) and
+// DetectionSettings.kt (DetectionSettings / "detection_settings" DataStore)
+// represent TWO PARALLEL configuration systems with OVERLAPPING fields.
+//
+// The UI (DetectionSettingsScreen) reads and writes ONLY to DetectionSettings
+// via DetectionSettingsRepository. DetectionConfig is a newer system intended
+// to be the "single source of truth" but the UI has NOT been migrated to it.
+//
+// DUPLICATED FIELDS (DetectionSettings field -> DetectionConfig field):
+//
+// === Global ===
+//   enableBleDetection          -> BleProtocolConfig.enabled
+//   enableWifiDetection         -> WifiProtocolConfig.enabled
+//   enableCellularDetection     -> CellularProtocolConfig.enabled
+//   enableSatelliteDetection    -> SatelliteProtocolConfig.enabled
+//   enableGnssDetection         -> GnssProtocolConfig.enabled
+//   enableRfDetection           -> RfProtocolConfig.enabled
+//   enableUltrasonicDetection   -> UltrasonicProtocolConfig.enabled
+//   advancedMode                -> GlobalDetectionSettings.advancedMode
+//   enableHiddenNetworkRfAnomaly -> RfProtocolConfig.enableHiddenNetworkAnomaly
+//
+// === BLE Thresholds ===
+//   BleThresholds.minRssiForAlert         -> BleProtocolConfig.minRssi
+//   BleThresholds.proximityAlertRssi      -> BleProtocolConfig.proximityAlertRssi
+//   BleThresholds.trackingDurationMs      -> BleProtocolConfig.trackingDuration
+//   BleThresholds.minSeenCountForTracking -> BleProtocolConfig.minSeenCount
+//
+// === WiFi Thresholds ===
+//   WifiThresholds.minSignalForAlert          -> WifiProtocolConfig.minSignal
+//   WifiThresholds.strongSignalThreshold      -> WifiProtocolConfig.strongSignalThreshold
+//   WifiThresholds.trackingDurationMs         -> WifiProtocolConfig.trackingDuration
+//   WifiThresholds.minSeenCountForTracking    -> WifiProtocolConfig.minSeenCount
+//   WifiThresholds.minTrackingDistanceMeters  -> WifiProtocolConfig.minTrackingDistance
+//
+// === Cellular Thresholds ===
+//   CellularThresholds.signalSpikeThreshold      -> CellularProtocolConfig.signalSpikeThreshold
+//   CellularThresholds.rapidSwitchCountStationary -> CellularProtocolConfig.rapidSwitchCountStationary
+//   CellularThresholds.rapidSwitchCountMoving     -> CellularProtocolConfig.rapidSwitchCountMoving
+//   CellularThresholds.trustedCellThreshold       -> CellularProtocolConfig.trustedCellThreshold
+//   CellularThresholds.minAnomalyIntervalMs       -> CellularProtocolConfig.minAnomalyInterval
+//
+// === Satellite Thresholds ===
+//   SatelliteThresholds.unexpectedSatelliteThresholdMs -> SatelliteProtocolConfig.unexpectedSatelliteThreshold
+//   SatelliteThresholds.rapidHandoffThresholdMs        -> SatelliteProtocolConfig.rapidHandoffThreshold
+//   SatelliteThresholds.minSignalForTerrestrial        -> SatelliteProtocolConfig.minSignalForTerrestrial
+//   SatelliteThresholds.rapidSwitchingWindowMs         -> SatelliteProtocolConfig.rapidSwitchingWindow
+//   SatelliteThresholds.rapidSwitchingCount            -> SatelliteProtocolConfig.rapidSwitchingCount
+//
+// === GNSS Thresholds ===
+//   GnssThresholds.cn0DeviationThreshold  -> GnssProtocolConfig.cn0DeviationThreshold
+//   GnssThresholds.clockDriftThreshold    -> GnssProtocolConfig.clockDriftThreshold
+//   GnssThresholds.minSatellites          -> GnssProtocolConfig.minSatellites
+//   GnssThresholds.positionJumpThreshold  -> GnssProtocolConfig.positionJumpThreshold
+//
+// === RF Thresholds ===
+//   RfThresholds.hiddenNetworkThreshold    -> RfProtocolConfig.hiddenNetworkThreshold
+//   RfThresholds.jammerDetectionThreshold  -> RfProtocolConfig.jammerDetectionThreshold
+//   RfThresholds.subGhzFrequencies         -> RfProtocolConfig.subGhzFrequencies
+//
+// === Ultrasonic Thresholds ===
+//   UltrasonicThresholds.minAmplitude        -> UltrasonicProtocolConfig.minAmplitude
+//   UltrasonicThresholds.frequencyRangeStart -> UltrasonicProtocolConfig.frequencyRangeStart
+//   UltrasonicThresholds.frequencyRangeEnd   -> UltrasonicProtocolConfig.frequencyRangeEnd
+//
+// === Pattern Toggles ===
+//   enabledCellularPatterns  -> CellularProtocolConfig.enabledPatterns
+//   enabledSatellitePatterns -> SatelliteProtocolConfig.enabledPatterns
+//   enabledBlePatterns       -> BleProtocolConfig.enabledPatterns
+//   enabledWifiPatterns      -> WifiProtocolConfig.enabledPatterns
+//   enabledGnssPatterns      -> (GnssProtocolConfig has no enabledPatterns field)
+//   enabledRfPatterns        -> (RfProtocolConfig has no enabledPatterns field)
+//   enabledUltrasonicPatterns -> UltrasonicProtocolConfig.enabledSources
+//
+// FIELDS ONLY IN DetectionConfig (NOT in DetectionSettings):
+//   GlobalDetectionSettings.trackSeenDevices
+//   GlobalDetectionSettings.ephemeralMode
+//   GlobalDetectionSettings.defaultThreatLevelFilter
+//   GlobalDetectionSettings.enableCorrelation
+//   GlobalDetectionSettings.activeDetectionWindowMs
+//   GlobalDetectionSettings.enableAiAnalysis
+//   GlobalDetectionSettings.showNotifications
+//   GlobalDetectionSettings.notificationThreatLevel
+//   BleProtocolConfig.enableAddressRotationTracking
+//   BleProtocolConfig.addressRotationThreshold
+//   BleProtocolConfig.enableBeaconDetection
+//   BleProtocolConfig.strongSignalThreshold
+//   WifiProtocolConfig.enableEvilTwinDetection
+//   WifiProtocolConfig.enableDeauthDetection
+//   WifiProtocolConfig.deauthThresholdPerMinute
+//   WifiProtocolConfig.enableHiddenNetworkDetection
+//   WifiProtocolConfig.enableKarmaDetection
+//   CellularProtocolConfig.movementSpeedThreshold
+//   CellularProtocolConfig.enableEncryptionDowngradeDetection
+//   CellularProtocolConfig.enableImsiCatcherDetection
+//   CellularProtocolConfig.suspiciousMccMncCodes
+//   SatelliteProtocolConfig.enableNtnValidation
+//   SatelliteProtocolConfig.enableTimingAnomalyDetection
+//   UltrasonicProtocolConfig.trackingDuration
+//   UltrasonicProtocolConfig.fftWindowSize
+//   UltrasonicProtocolConfig.enableContinuousMonitoring
+//   UltrasonicProtocolConfig.sampleRate
+//   GnssProtocolConfig.enablePseudorangeValidation
+//   GnssProtocolConfig.enableCarrierPhaseValidation
+//   GnssProtocolConfig.enableMultipathDetection
+//   GnssProtocolConfig.enableConstellationCrossCheck
+//   GnssProtocolConfig.enabledConstellations
+//   RfProtocolConfig.enableSpectrumAnalysis
+//   RfProtocolConfig.enableSubGhzScanning
+//   RfProtocolConfig.enableDroneDetection
+//   DeviceTypeOverride (per-device-type notification/scoring overrides)
+//
+// SYNC RISK: Changes made in the UI (via DetectionSettingsRepository) do NOT
+// propagate to DetectionConfig. The migrateFromLegacySettings() method is a
+// one-time migration and does not keep the two systems in sync afterward.
+// Any code reading from DetectionConfig may see stale values if the user has
+// changed settings via the UI since the initial migration.
+//
+// RECOMMENDED FIX: Either (a) migrate the UI to read/write DetectionConfig
+// exclusively, or (b) add a synchronization layer that propagates changes
+// from DetectionSettings to DetectionConfig on every update.
+// ============================================================================
+
 /**
  * Unified detection configuration that consolidates all scattered threshold
  * and setting configurations across the app.
@@ -416,7 +542,7 @@ data class UltrasonicProtocolConfig(
  */
 // Data class for Gson serialization
 data class GnssProtocolConfig(
-    override val enabled: Boolean = true,
+    override val enabled: Boolean = false, // Disabled by default - high false positive rate in practice
 
     /** C/N0 deviation threshold (dB-Hz) for spoofing detection */
     val cn0DeviationThreshold: Double = 10.0,
@@ -725,16 +851,32 @@ class DetectionConfigRepositoryImpl @Inject constructor(
                     ),
                     DetectionProtocol.AUDIO.name to ProtocolConfigWrapper(
                         type = ProtocolConfigType.ULTRASONIC,
-                        config = UltrasonicProtocolConfig()
+                        config = UltrasonicProtocolConfig(
+                            enabled = legacySettings.enableUltrasonicDetection,
+                            minAmplitude = legacySettings.ultrasonicThresholds.minAmplitude,
+                            frequencyRangeStart = legacySettings.ultrasonicThresholds.frequencyRangeStart,
+                            frequencyRangeEnd = legacySettings.ultrasonicThresholds.frequencyRangeEnd,
+                            enabledSources = legacySettings.enabledUltrasonicPatterns.map { it.name }.toSet()
+                        )
                     ),
                     DetectionProtocol.GNSS.name to ProtocolConfigWrapper(
                         type = ProtocolConfigType.GNSS,
-                        config = GnssProtocolConfig()
+                        config = GnssProtocolConfig(
+                            enabled = legacySettings.enableGnssDetection,
+                            cn0DeviationThreshold = legacySettings.gnssThresholds.cn0DeviationThreshold,
+                            clockDriftThreshold = legacySettings.gnssThresholds.clockDriftThreshold,
+                            minSatellites = legacySettings.gnssThresholds.minSatellites,
+                            positionJumpThreshold = legacySettings.gnssThresholds.positionJumpThreshold
+                        )
                     ),
                     DetectionProtocol.RF.name to ProtocolConfigWrapper(
                         type = ProtocolConfigType.RF,
                         config = RfProtocolConfig(
-                            enableHiddenNetworkAnomaly = legacySettings.enableHiddenNetworkRfAnomaly
+                            enabled = legacySettings.enableRfDetection,
+                            hiddenNetworkThreshold = legacySettings.rfThresholds.hiddenNetworkThreshold,
+                            enableHiddenNetworkAnomaly = legacySettings.enableHiddenNetworkRfAnomaly,
+                            jammerDetectionThreshold = legacySettings.rfThresholds.jammerDetectionThreshold,
+                            subGhzFrequencies = legacySettings.rfThresholds.subGhzFrequencies
                         )
                     )
                 ),

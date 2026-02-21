@@ -355,11 +355,22 @@ fun MainScreen(
         }
     ) { paddingValues ->
         // Swipeable HorizontalPager for tab navigation with pull-to-refresh
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
+            // Satellite connection banner - shown across all tabs when satellite is active
+            val satState = uiState.satelliteState
+            if (satState?.isConnected == true) {
+                SatelliteConnectionBanner(satelliteState = satState)
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f)
+            ) {
             HorizontalPager(
                 state = pagerState,
                 modifier = Modifier
@@ -811,9 +822,10 @@ fun MainScreen(
                     }
                 }
             }
-        }
+        } // Close weighted Box
+        } // Close outer Column
     }
-    
+
     // Filter bottom sheet
     if (showFilterSheet) {
         FilterBottomSheet(
@@ -945,6 +957,53 @@ fun MainScreen(
             result = result,
             onDismiss = { viewModel.clearAnalysisResult() }
         )
+    }
+}
+
+@Composable
+fun SatelliteConnectionBanner(
+    satelliteState: com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState
+) {
+    val providerName = when (satelliteState.provider) {
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.STARLINK -> "Starlink"
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.SKYLO -> "Skylo"
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.GLOBALSTAR -> "Globalstar"
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.AST_SPACEMOBILE -> "AST SpaceMobile"
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.LYNK -> "Lynk"
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.IRIDIUM -> "Iridium"
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.INMARSAT -> "Inmarsat"
+        com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.UNKNOWN -> satelliteState.networkName ?: "Unknown"
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFFFFA726),
+        contentColor = Color.Black
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.SatelliteAlt,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Connected to $providerName Satellite",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Not a terrestrial connection",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
     }
 }
 

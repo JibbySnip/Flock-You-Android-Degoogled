@@ -50,9 +50,29 @@ class DetectionSettingsViewModel @Inject constructor(
     fun toggleWifiPattern(pattern: WifiPattern, enabled: Boolean) {
         viewModelScope.launch { repository.toggleWifiPattern(pattern, enabled) }
     }
-    
-    fun setGlobalEnabled(cellular: Boolean? = null, satellite: Boolean? = null, ble: Boolean? = null, wifi: Boolean? = null) {
-        viewModelScope.launch { repository.setGlobalDetectionEnabled(cellular, satellite, ble, wifi) }
+
+    fun toggleGnssPattern(pattern: GnssPattern, enabled: Boolean) {
+        viewModelScope.launch { repository.toggleGnssPattern(pattern, enabled) }
+    }
+
+    fun toggleRfPattern(pattern: RfPattern, enabled: Boolean) {
+        viewModelScope.launch { repository.toggleRfPattern(pattern, enabled) }
+    }
+
+    fun toggleUltrasonicPattern(pattern: UltrasonicPattern, enabled: Boolean) {
+        viewModelScope.launch { repository.toggleUltrasonicPattern(pattern, enabled) }
+    }
+
+    fun setGlobalEnabled(
+        cellular: Boolean? = null,
+        satellite: Boolean? = null,
+        ble: Boolean? = null,
+        wifi: Boolean? = null,
+        gnss: Boolean? = null,
+        rf: Boolean? = null,
+        ultrasonic: Boolean? = null
+    ) {
+        viewModelScope.launch { repository.setGlobalDetectionEnabled(cellular, satellite, ble, wifi, gnss, rf, ultrasonic) }
     }
     
     fun updateCellularThresholds(thresholds: CellularThresholds) {
@@ -151,6 +171,49 @@ class DetectionSettingsViewModel @Inject constructor(
         viewModelScope.launch { repository.updateWifiMinTrackingDistance(value) }
     }
 
+    // Individual GNSS threshold updates
+    fun updateGnssCn0Deviation(value: Double) {
+        viewModelScope.launch { repository.updateGnssCn0Deviation(value) }
+    }
+
+    fun updateGnssClockDrift(value: Double) {
+        viewModelScope.launch { repository.updateGnssClockDrift(value) }
+    }
+
+    fun updateGnssMinSatellites(value: Int) {
+        viewModelScope.launch { repository.updateGnssMinSatellites(value) }
+    }
+
+    fun updateGnssPositionJump(value: Double) {
+        viewModelScope.launch { repository.updateGnssPositionJump(value) }
+    }
+
+    // Individual RF threshold updates
+    fun updateRfHiddenNetworkThreshold(value: Int) {
+        viewModelScope.launch { repository.updateRfHiddenNetworkThreshold(value) }
+    }
+
+    fun updateRfJammerDetectionThreshold(value: Int) {
+        viewModelScope.launch { repository.updateRfJammerDetectionThreshold(value) }
+    }
+
+    fun updateRfSubGhzFrequencies(value: String) {
+        viewModelScope.launch { repository.updateRfSubGhzFrequencies(value) }
+    }
+
+    // Individual Ultrasonic threshold updates
+    fun updateUltrasonicMinAmplitude(value: Double) {
+        viewModelScope.launch { repository.updateUltrasonicMinAmplitude(value) }
+    }
+
+    fun updateUltrasonicFreqStart(value: Int) {
+        viewModelScope.launch { repository.updateUltrasonicFreqStart(value) }
+    }
+
+    fun updateUltrasonicFreqEnd(value: Int) {
+        viewModelScope.launch { repository.updateUltrasonicFreqEnd(value) }
+    }
+
     fun resetToDefaults() {
         viewModelScope.launch { repository.resetToDefaults() }
     }
@@ -165,7 +228,7 @@ fun DetectionSettingsScreen(
     val settings by viewModel.settings.collectAsState()
 
     var selectedTab by remember { mutableStateOf(0) }
-    val tabs = listOf("Cellular", "Satellite", "BLE", "WiFi")
+    val tabs = listOf("Cellular", "Satellite", "BLE", "WiFi", "GNSS", "RF", "Ultrasonic")
 
     var showResetDialog by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -220,7 +283,10 @@ fun DetectionSettingsScreen(
                                         0 -> Icons.Default.CellTower
                                         1 -> Icons.Default.SatelliteAlt
                                         2 -> Icons.Default.Bluetooth
-                                        else -> Icons.Default.Wifi
+                                        3 -> Icons.Default.Wifi
+                                        4 -> Icons.Default.GpsFixed
+                                        5 -> Icons.Default.Radio
+                                        else -> Icons.Default.Mic
                                     },
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp)
@@ -290,6 +356,43 @@ fun DetectionSettingsScreen(
                     onUpdateTrackingCount = { viewModel.updateWifiTrackingCount(it) },
                     onUpdateMinTrackingDistance = { viewModel.updateWifiMinTrackingDistance(it) }
                 )
+                4 -> GnssSettingsContent(
+                    settings = settings,
+                    onTogglePattern = { pattern, enabled ->
+                        viewModel.toggleGnssPattern(pattern, enabled)
+                    },
+                    onToggleGlobal = { enabled ->
+                        viewModel.setGlobalEnabled(gnss = enabled)
+                    },
+                    onUpdateCn0Deviation = { viewModel.updateGnssCn0Deviation(it) },
+                    onUpdateClockDrift = { viewModel.updateGnssClockDrift(it) },
+                    onUpdateMinSatellites = { viewModel.updateGnssMinSatellites(it) },
+                    onUpdatePositionJump = { viewModel.updateGnssPositionJump(it) }
+                )
+                5 -> RfSettingsContent(
+                    settings = settings,
+                    onTogglePattern = { pattern, enabled ->
+                        viewModel.toggleRfPattern(pattern, enabled)
+                    },
+                    onToggleGlobal = { enabled ->
+                        viewModel.setGlobalEnabled(rf = enabled)
+                    },
+                    onUpdateHiddenNetworkThreshold = { viewModel.updateRfHiddenNetworkThreshold(it) },
+                    onUpdateJammerDetectionThreshold = { viewModel.updateRfJammerDetectionThreshold(it) },
+                    onUpdateSubGhzFrequencies = { viewModel.updateRfSubGhzFrequencies(it) }
+                )
+                6 -> UltrasonicSettingsContent(
+                    settings = settings,
+                    onTogglePattern = { pattern, enabled ->
+                        viewModel.toggleUltrasonicPattern(pattern, enabled)
+                    },
+                    onToggleGlobal = { enabled ->
+                        viewModel.setGlobalEnabled(ultrasonic = enabled)
+                    },
+                    onUpdateMinAmplitude = { viewModel.updateUltrasonicMinAmplitude(it) },
+                    onUpdateFreqStart = { viewModel.updateUltrasonicFreqStart(it) },
+                    onUpdateFreqEnd = { viewModel.updateUltrasonicFreqEnd(it) }
+                )
             }
         }
     }
@@ -352,6 +455,21 @@ fun DetectionSettingsScreen(
                     HelpSection(
                         title = "Tracking Alerts",
                         description = "Duration and count thresholds determine when a device is flagged as \"following\" you across locations."
+                    )
+
+                    HelpSection(
+                        title = "GNSS/GPS",
+                        description = "Detects GPS spoofing, jamming, and satellite anomalies. C/N0 measures signal quality; deviations indicate interference."
+                    )
+
+                    HelpSection(
+                        title = "RF Analysis",
+                        description = "Detects jammers, drones, and hidden transmitters. Requires Flipper Zero or system privileges for sub-GHz scanning."
+                    )
+
+                    HelpSection(
+                        title = "Ultrasonic",
+                        description = "Detects inaudible ultrasonic beacons used for ad tracking and cross-device linking. Privacy consent required."
                     )
 
                     Text(
@@ -1459,6 +1577,452 @@ private fun PatternToggleCard(
         }
     }
 }
+
+// ==================== GNSS Settings ====================
+
+@Composable
+private fun GnssSettingsContent(
+    settings: DetectionSettings,
+    onTogglePattern: (GnssPattern, Boolean) -> Unit,
+    onToggleGlobal: (Boolean) -> Unit,
+    onUpdateCn0Deviation: (Double) -> Unit,
+    onUpdateClockDrift: (Double) -> Unit,
+    onUpdateMinSatellites: (Int) -> Unit,
+    onUpdatePositionJump: (Double) -> Unit
+) {
+    var showThresholds by remember { mutableStateOf(false) }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            GlobalToggleCard(
+                title = "GNSS/GPS Detection",
+                description = "Monitor for GPS spoofing and jamming",
+                icon = Icons.Default.GpsFixed,
+                enabled = settings.enableGnssDetection,
+                onToggle = onToggleGlobal,
+                enabledCount = settings.enabledGnssPatterns.size,
+                totalCount = GnssPattern.values().size
+            )
+        }
+
+        item {
+            ThresholdsSectionCard(
+                title = "GNSS Thresholds",
+                expanded = showThresholds,
+                onToggle = { showThresholds = !showThresholds }
+            ) {
+                GnssThresholdsContent(
+                    thresholds = settings.gnssThresholds,
+                    onUpdateCn0Deviation = onUpdateCn0Deviation,
+                    onUpdateClockDrift = onUpdateClockDrift,
+                    onUpdateMinSatellites = onUpdateMinSatellites,
+                    onUpdatePositionJump = onUpdatePositionJump
+                )
+            }
+        }
+
+        item {
+            Text(
+                text = "Detection Patterns",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+        }
+
+        items(GnssPattern.values().toList()) { pattern ->
+            PatternToggleCard(
+                name = pattern.displayName,
+                description = pattern.description,
+                enabled = pattern in settings.enabledGnssPatterns,
+                globalEnabled = settings.enableGnssDetection,
+                onToggle = { onTogglePattern(pattern, it) }
+            )
+        }
+
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+    }
+}
+
+@Composable
+private fun GnssThresholdsContent(
+    thresholds: GnssThresholds,
+    onUpdateCn0Deviation: (Double) -> Unit,
+    onUpdateClockDrift: (Double) -> Unit,
+    onUpdateMinSatellites: (Int) -> Unit,
+    onUpdatePositionJump: (Double) -> Unit
+) {
+    var cn0Deviation by remember(thresholds.cn0DeviationThreshold) { mutableStateOf(thresholds.cn0DeviationThreshold.toFloat()) }
+    var clockDrift by remember(thresholds.clockDriftThreshold) { mutableStateOf(thresholds.clockDriftThreshold.toFloat()) }
+    var minSatellites by remember(thresholds.minSatellites) { mutableStateOf(thresholds.minSatellites.toFloat()) }
+    var positionJump by remember(thresholds.positionJumpThreshold) { mutableStateOf(thresholds.positionJumpThreshold.toFloat()) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        ThresholdSlider(
+            label = "C/N0 Deviation Threshold",
+            value = cn0Deviation,
+            valueRange = 5f..20f,
+            unit = "dB-Hz",
+            description = "Signal quality deviation to trigger spoofing alert",
+            onValueChange = { cn0Deviation = it },
+            onValueChangeFinished = {
+                onUpdateCn0Deviation(cn0Deviation.toDouble())
+            }
+        )
+
+        ThresholdSlider(
+            label = "Clock Drift Threshold",
+            value = clockDrift,
+            valueRange = 50f..500f,
+            unit = "ns",
+            description = "Clock drift threshold for anomaly detection",
+            onValueChange = { clockDrift = it },
+            onValueChangeFinished = {
+                onUpdateClockDrift(clockDrift.toDouble())
+            }
+        )
+
+        ThresholdSlider(
+            label = "Minimum Satellites",
+            value = minSatellites,
+            valueRange = 3f..8f,
+            unit = "sats",
+            steps = 4,
+            description = "Minimum satellites required for valid fix",
+            onValueChange = { minSatellites = it },
+            onValueChangeFinished = {
+                onUpdateMinSatellites(minSatellites.toInt())
+            }
+        )
+
+        ThresholdSlider(
+            label = "Position Jump Threshold",
+            value = positionJump,
+            valueRange = 50f..500f,
+            unit = "m",
+            description = "Distance for impossible position jump detection",
+            onValueChange = { positionJump = it },
+            onValueChangeFinished = {
+                onUpdatePositionJump(positionJump.toDouble())
+            }
+        )
+    }
+}
+
+// ==================== RF Settings ====================
+
+@Composable
+private fun RfSettingsContent(
+    settings: DetectionSettings,
+    onTogglePattern: (RfPattern, Boolean) -> Unit,
+    onToggleGlobal: (Boolean) -> Unit,
+    onUpdateHiddenNetworkThreshold: (Int) -> Unit,
+    onUpdateJammerDetectionThreshold: (Int) -> Unit,
+    onUpdateSubGhzFrequencies: (String) -> Unit
+) {
+    var showThresholds by remember { mutableStateOf(false) }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            GlobalToggleCard(
+                title = "RF Analysis Detection",
+                description = "Monitor for RF jammers, drones, and surveillance",
+                icon = Icons.Default.Radio,
+                enabled = settings.enableRfDetection,
+                onToggle = onToggleGlobal,
+                enabledCount = settings.enabledRfPatterns.size,
+                totalCount = RfPattern.values().size
+            )
+        }
+
+        // Info banner
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "RF features require Flipper Zero or system privileges for sub-GHz scanning",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+        }
+
+        item {
+            ThresholdsSectionCard(
+                title = "RF Thresholds",
+                expanded = showThresholds,
+                onToggle = { showThresholds = !showThresholds }
+            ) {
+                RfThresholdsContent(
+                    thresholds = settings.rfThresholds,
+                    onUpdateHiddenNetworkThreshold = onUpdateHiddenNetworkThreshold,
+                    onUpdateJammerDetectionThreshold = onUpdateJammerDetectionThreshold,
+                    onUpdateSubGhzFrequencies = onUpdateSubGhzFrequencies
+                )
+            }
+        }
+
+        item {
+            Text(
+                text = "Detection Patterns",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+        }
+
+        items(RfPattern.values().toList()) { pattern ->
+            PatternToggleCard(
+                name = pattern.displayName,
+                description = pattern.description,
+                enabled = pattern in settings.enabledRfPatterns,
+                globalEnabled = settings.enableRfDetection,
+                onToggle = { onTogglePattern(pattern, it) }
+            )
+        }
+
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+    }
+}
+
+@Composable
+private fun RfThresholdsContent(
+    thresholds: RfThresholds,
+    onUpdateHiddenNetworkThreshold: (Int) -> Unit,
+    onUpdateJammerDetectionThreshold: (Int) -> Unit,
+    onUpdateSubGhzFrequencies: (String) -> Unit
+) {
+    var hiddenNetwork by remember(thresholds.hiddenNetworkThreshold) { mutableStateOf(thresholds.hiddenNetworkThreshold.toFloat()) }
+    var jammerDetection by remember(thresholds.jammerDetectionThreshold) { mutableStateOf(thresholds.jammerDetectionThreshold.toFloat()) }
+    var subGhzFreqs by remember(thresholds.subGhzFrequencies) { mutableStateOf(thresholds.subGhzFrequencies) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        ThresholdSlider(
+            label = "Hidden Network Threshold",
+            value = hiddenNetwork,
+            valueRange = 2f..15f,
+            unit = "networks",
+            steps = 12,
+            description = "Number of hidden networks to trigger alert",
+            onValueChange = { hiddenNetwork = it },
+            onValueChangeFinished = {
+                onUpdateHiddenNetworkThreshold(hiddenNetwork.toInt())
+            }
+        )
+
+        ThresholdSlider(
+            label = "Jammer Detection Threshold",
+            value = jammerDetection,
+            valueRange = 10f..60f,
+            unit = "dB",
+            description = "Signal drop threshold for jammer detection",
+            onValueChange = { jammerDetection = it },
+            onValueChangeFinished = {
+                onUpdateJammerDetectionThreshold(jammerDetection.toInt())
+            }
+        )
+
+        // Sub-GHz frequencies text field
+        Column {
+            Text(
+                text = "Sub-GHz Frequencies",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "Comma-separated MHz values to monitor",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            OutlinedTextField(
+                value = subGhzFreqs,
+                onValueChange = { subGhzFreqs = it },
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                    fontFamily = FontFamily.Monospace
+                ),
+                singleLine = true,
+                label = { Text("Frequencies (MHz)") }
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            TextButton(
+                onClick = { onUpdateSubGhzFrequencies(subGhzFreqs) }
+            ) {
+                Text("Apply")
+            }
+        }
+    }
+}
+
+// ==================== Ultrasonic Settings ====================
+
+@Composable
+private fun UltrasonicSettingsContent(
+    settings: DetectionSettings,
+    onTogglePattern: (UltrasonicPattern, Boolean) -> Unit,
+    onToggleGlobal: (Boolean) -> Unit,
+    onUpdateMinAmplitude: (Double) -> Unit,
+    onUpdateFreqStart: (Int) -> Unit,
+    onUpdateFreqEnd: (Int) -> Unit
+) {
+    var showThresholds by remember { mutableStateOf(false) }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            GlobalToggleCard(
+                title = "Ultrasonic Detection",
+                description = "Monitor for ultrasonic tracking beacons",
+                icon = Icons.Default.Mic,
+                enabled = settings.enableUltrasonicDetection,
+                onToggle = onToggleGlobal,
+                enabledCount = settings.enabledUltrasonicPatterns.size,
+                totalCount = UltrasonicPattern.values().size
+            )
+        }
+
+        // Info banner
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Privacy consent managed in Privacy Settings. Microphone access required.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+        }
+
+        item {
+            ThresholdsSectionCard(
+                title = "Ultrasonic Thresholds",
+                expanded = showThresholds,
+                onToggle = { showThresholds = !showThresholds }
+            ) {
+                UltrasonicThresholdsContent(
+                    thresholds = settings.ultrasonicThresholds,
+                    onUpdateMinAmplitude = onUpdateMinAmplitude,
+                    onUpdateFreqStart = onUpdateFreqStart,
+                    onUpdateFreqEnd = onUpdateFreqEnd
+                )
+            }
+        }
+
+        item {
+            Text(
+                text = "Detection Patterns",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+        }
+
+        items(UltrasonicPattern.values().toList()) { pattern ->
+            PatternToggleCard(
+                name = pattern.displayName,
+                description = pattern.description,
+                enabled = pattern in settings.enabledUltrasonicPatterns,
+                globalEnabled = settings.enableUltrasonicDetection,
+                onToggle = { onTogglePattern(pattern, it) }
+            )
+        }
+
+        item { Spacer(modifier = Modifier.height(16.dp)) }
+    }
+}
+
+@Composable
+private fun UltrasonicThresholdsContent(
+    thresholds: UltrasonicThresholds,
+    onUpdateMinAmplitude: (Double) -> Unit,
+    onUpdateFreqStart: (Int) -> Unit,
+    onUpdateFreqEnd: (Int) -> Unit
+) {
+    var minAmplitude by remember(thresholds.minAmplitude) { mutableStateOf(thresholds.minAmplitude.toFloat()) }
+    var freqStart by remember(thresholds.frequencyRangeStart) { mutableStateOf(thresholds.frequencyRangeStart.toFloat()) }
+    var freqEnd by remember(thresholds.frequencyRangeEnd) { mutableStateOf(thresholds.frequencyRangeEnd.toFloat()) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        ThresholdSlider(
+            label = "Minimum Amplitude",
+            value = minAmplitude,
+            valueRange = -50f..-20f,
+            unit = "dB",
+            description = "Minimum signal amplitude for detection",
+            onValueChange = { minAmplitude = it },
+            onValueChangeFinished = {
+                onUpdateMinAmplitude(minAmplitude.toDouble())
+            }
+        )
+
+        ThresholdSlider(
+            label = "Frequency Range Start",
+            value = freqStart,
+            valueRange = 16000f..20000f,
+            unit = "Hz",
+            description = "Start of ultrasonic detection range",
+            onValueChange = { freqStart = it },
+            onValueChangeFinished = {
+                onUpdateFreqStart(freqStart.toInt())
+            }
+        )
+
+        ThresholdSlider(
+            label = "Frequency Range End",
+            value = freqEnd,
+            valueRange = 18000f..24000f,
+            unit = "Hz",
+            description = "End of ultrasonic detection range",
+            onValueChange = { freqEnd = it },
+            onValueChangeFinished = {
+                onUpdateFreqEnd(freqEnd.toInt())
+            }
+        )
+    }
+}
+
+// ==================== Common Components ====================
 
 @Composable
 private fun ThresholdSlider(

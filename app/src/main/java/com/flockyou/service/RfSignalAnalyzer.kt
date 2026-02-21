@@ -13,22 +13,33 @@ import java.util.UUID
 /**
  * Analyzes RF signal environment for anomalies indicating surveillance or jamming.
  *
- * Detection methods:
- * 1. Jammer Detection - Sudden WiFi/BT signal dropouts
- * 2. Unusual 2.4GHz/5GHz Activity - Dense signal patterns suggesting surveillance
- * 3. Signal Fingerprinting - Matching known surveillance device RF signatures
- * 4. Spectrum Anomalies - Broadband interference patterns
- * 5. Drone Detection - Common drone WiFi patterns (DJI, etc.)
- * 6. Hidden Transmitter Detection - Continuous RF sources
+ * IMPORTANT: All detection in this class uses WiFi scan data as a PROXY for RF
+ * environment analysis. Android provides no direct access to the RF spectrum.
+ * True spectrum analysis, sub-GHz detection, and non-WiFi transmitter detection
+ * require external SDR hardware (Flipper Zero, HackRF, RTL-SDR).
  *
- * Note: Android has limited RF access. This uses WiFi/BLE scan data as a proxy
- * for RF environment analysis. True spectrum analysis requires SDR hardware.
+ * Detection methods (all WiFi-proxy based):
+ * 1. Jammer Detection - Inferred from sustained WiFi signal loss (INDIRECT)
+ * 2. Unusual 2.4GHz/5GHz Activity - Dense hidden network patterns
+ * 3. Signal Fingerprinting - Matching known surveillance device WiFi OUIs
+ * 4. Spectrum Anomalies - WiFi signal statistics changes (NOT true spectrum analysis)
+ * 5. Drone Detection - Drone controller WiFi OUI/SSID matching
+ * 6. Hidden Transmitter Detection - Hidden WiFi network clusters (NOT RF sweep)
+ *
+ * The enableHiddenNetworkRfAnomaly setting controls detection of high hidden WiFi
+ * network density. This is conceptually a WiFi feature placed in the RF analyzer.
+ * It is disabled by default due to high false positive rates in urban environments.
  */
 class RfSignalAnalyzer(
     private val context: Context,
     private val errorCallback: ScanningService.DetectorCallback? = null
 ) {
-    // Setting to control hidden network RF anomaly detection (disabled by default)
+    // Setting to control hidden network RF anomaly detection (disabled by default).
+    // Note: This is conceptually a WiFi feature (analyzes hidden WiFi SSIDs) placed in
+    // the RF analyzer. Consider refactoring to WifiDetectionHandler in a future release.
+    // The RF analyzer itself is gated by DetectionSettings.enableRfDetection (defaults false).
+    // OEM_FEATURE_FLIPPER_ENABLED controls Flipper Zero sub-GHz access but does NOT gate
+    // this WiFi-proxy RF analysis, which operates independently of SDR hardware.
     var enableHiddenNetworkRfAnomaly: Boolean = false
 
     companion object {

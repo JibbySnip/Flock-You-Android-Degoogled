@@ -7,6 +7,7 @@ import android.content.SharedPreferences
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.flockyou.BuildConfig
 
 /**
  * Receives boot completed broadcasts and restarts the scanning service
@@ -25,15 +26,37 @@ class BootReceiver : BroadcastReceiver() {
         }
         
         fun isServiceEnabled(context: Context): Boolean {
-            return getPrefs(context).getBoolean(KEY_SERVICE_ENABLED, false)
+            // OEM builds default to service always enabled for continuous background scanning
+            val defaultEnabled = BuildConfig.IS_OEM_BUILD
+            return getPrefs(context).getBoolean(KEY_SERVICE_ENABLED, defaultEnabled)
         }
-        
+
         fun setAutoStartOnBoot(context: Context, enabled: Boolean) {
             getPrefs(context).edit().putBoolean(KEY_AUTO_START_ON_BOOT, enabled).apply()
         }
-        
+
         fun isAutoStartOnBoot(context: Context): Boolean {
+            // OEM builds always auto-start on boot for continuous background scanning
             return getPrefs(context).getBoolean(KEY_AUTO_START_ON_BOOT, true)
+        }
+
+        /**
+         * Initialize OEM defaults on first run.
+         * For OEM builds, this ensures the service is enabled and will auto-start.
+         */
+        fun initializeOemDefaults(context: Context) {
+            if (!BuildConfig.IS_OEM_BUILD) return
+
+            val prefs = getPrefs(context)
+            val initialized = prefs.getBoolean("oem_defaults_initialized", false)
+            if (!initialized) {
+                prefs.edit()
+                    .putBoolean(KEY_SERVICE_ENABLED, true)
+                    .putBoolean(KEY_AUTO_START_ON_BOOT, true)
+                    .putBoolean("oem_defaults_initialized", true)
+                    .apply()
+                Log.i(TAG, "OEM defaults initialized: service enabled, auto-start on boot")
+            }
         }
         
         private fun getPrefs(context: Context): SharedPreferences {

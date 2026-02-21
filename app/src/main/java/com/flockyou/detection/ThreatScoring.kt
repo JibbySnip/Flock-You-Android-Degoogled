@@ -119,6 +119,32 @@ object ThreatScoring {
         DeviceType.UNKNOWN_SURVEILLANCE to 1.0,
         DeviceType.PENGUIN_SURVEILLANCE to 1.0,
         DeviceType.PIGVISION_SYSTEM to 1.0
+
+        // =====================================================================
+        // AUDIT NOTE: The following DeviceType enum values are NOT in this map
+        // and will fall through to the default value of 1.0 via getImpactFactor().
+        //
+        // These ARE present in Detection.kt's getImpactFactorForDeviceType() with
+        // explicit values, creating a DESYNC between the two impact factor systems.
+        //
+        // Missing hacking tools (values from Detection.kt shown for reference):
+        //   DeviceType.FLIPPER_ZERO       -> 1.5 in Detection.kt, 1.0 here (default)
+        //   DeviceType.FLIPPER_ZERO_SPAM  -> 1.9 in Detection.kt, 1.0 here (default)
+        //   DeviceType.HACKRF_SDR         -> 1.6 in Detection.kt, 1.0 here (default)
+        //   DeviceType.PROXMARK           -> 1.7 in Detection.kt, 1.0 here (default)
+        //   DeviceType.USB_RUBBER_DUCKY   -> 1.8 in Detection.kt, 1.0 here (default)
+        //   DeviceType.LAN_TURTLE         -> 1.7 in Detection.kt, 1.0 here (default)
+        //   DeviceType.BASH_BUNNY         -> 1.8 in Detection.kt, 1.0 here (default)
+        //   DeviceType.KEYCROC            -> 1.8 in Detection.kt, 1.0 here (default)
+        //   DeviceType.SHARK_JACK         -> 1.7 in Detection.kt, 1.0 here (default)
+        //   DeviceType.SCREEN_CRAB        -> 1.6 in Detection.kt, 1.0 here (default)
+        //   DeviceType.GENERIC_HACKING_TOOL -> 1.5 in Detection.kt, 1.0 here (default)
+        //
+        // Impact: Hacking tool detections scored via ThreatScoring.calculateThreat()
+        // will receive a lower threat score than those scored via the legacy
+        // calculateThreatLevel() in Detection.kt. This should be resolved by
+        // adding these entries to the impactFactors map above.
+        // =====================================================================
     )
 
     /**

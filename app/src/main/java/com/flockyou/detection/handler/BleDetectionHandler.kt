@@ -107,18 +107,23 @@ class BleDetectionHandler @Inject constructor(
         const val MANUFACTURER_ID_GOOGLE = 0x00E0
 
         // ==================== FLIPPER ZERO BLE SPAM DETECTION ====================
+        // Thresholds tuned to reduce false positives in busy BLE environments
+        // (malls, airports, conferences, etc.)
 
-        /** Time window for BLE spam detection (milliseconds) */
-        const val BLE_SPAM_DETECTION_WINDOW_MS = 10000L
+        /** Time window for BLE spam detection (milliseconds) - extended to reduce transient triggers */
+        const val BLE_SPAM_DETECTION_WINDOW_MS = 20_000L  // Was 10s, now 20s
 
         /** Threshold for Apple device advertisements in spam window to trigger spam detection */
-        const val APPLE_SPAM_THRESHOLD = 15
+        const val APPLE_SPAM_THRESHOLD = 30  // Was 15 - raised to account for busy environments
 
         /** Threshold for Fast Pair advertisements in spam window to trigger spam detection */
-        const val FAST_PAIR_SPAM_THRESHOLD = 10
+        const val FAST_PAIR_SPAM_THRESHOLD = 25  // Was 10 - raised to account for busy environments
 
         /** Threshold for unique device names in spam window (rapid name changing) */
-        const val DEVICE_NAME_CHANGE_THRESHOLD = 8
+        const val DEVICE_NAME_CHANGE_THRESHOLD = 12  // Was 8 - raised to reduce false positives
+
+        /** Minimum threat score to trigger spam detection */
+        const val SPAM_THREAT_SCORE_THRESHOLD = 70  // Raised from implicit 60
 
         /** Google Fast Pair service UUID */
         val UUID_GOOGLE_FAST_PAIR: UUID = UUID.fromString("0000FE2C-0000-1000-8000-00805F9B34FB")
@@ -325,7 +330,68 @@ class BleDetectionHandler @Inject constructor(
      * Last spam detection alert time to prevent alert fatigue.
      */
     private var lastSpamAlertTime: Long = 0L
-    private val spamAlertCooldownMs = 60000L // 1 minute cooldown between spam alerts
+    private val spamAlertCooldownMs = 180_000L // 3 minute cooldown between spam alerts (was 1 minute)
+
+    // ==================== BLE Spam Confirmation System ====================
+    // Require sustained spam detection before alerting to prevent false positives
+    // from transient BLE activity in crowded environments
+
+    /**
+     * Tracks spam detection confirmations by spam type.
+     * Requires 2 detections within 30 seconds before alerting.
+     */
+    private data class SpamConfirmationState(
+        val firstDetectionTime: Long,
+        val detectionCount: Int,
+        val lastAnalysis: BleSpamAnalysis?
+    )
+
+    private val spamConfirmations = ConcurrentHashMap<BleSpamType, SpamConfirmationState>()
+    private val spamConfirmationWindowMs = 30_000L  // 30 second window
+    private val spamConfirmationRequired = 2  // Need 2 detections to confirm
+
+    /**
+     * Check if spam detection is confirmed (sustained activity).
+     * Returns true if this detection confirms a spam attack, false if still waiting.
+     */
+    private fun isSpamConfirmed(spamType: BleSpamType, analysis: BleSpamAnalysis): Boolean {
+        val now = System.currentTimeMillis()
+        val current = spamConfirmations[spamType]
+
+        // Very high threat scores bypass confirmation (clear attack)
+        if (analysis.threatScore >= 85) {
+            spamConfirmations.remove(spamType)
+            Log.i(TAG, "BLE Spam $spamType: HIGH CONFIDENCE (score ${analysis.threatScore}) - bypassing confirmation")
+            return true
+        }
+
+        if (current == null || (now - current.firstDetectionTime) > spamConfirmationWindowMs) {
+            // Start new confirmation window
+            spamConfirmations[spamType] = SpamConfirmationState(
+                firstDetectionTime = now,
+                detectionCount = 1,
+                lastAnalysis = analysis
+            )
+            Log.d(TAG, "BLE Spam $spamType: Started confirmation (1/$spamConfirmationRequired)")
+            return false
+        }
+
+        // Increment count
+        val newCount = current.detectionCount + 1
+        spamConfirmations[spamType] = current.copy(
+            detectionCount = newCount,
+            lastAnalysis = analysis
+        )
+        Log.d(TAG, "BLE Spam $spamType: Confirmation progress ($newCount/$spamConfirmationRequired)")
+
+        if (newCount >= spamConfirmationRequired) {
+            spamConfirmations.remove(spamType)
+            Log.i(TAG, "BLE Spam $spamType: CONFIRMED after $newCount detections")
+            return true
+        }
+
+        return false
+    }
 
     // ==================== Tracker Detection Thresholds ====================
 
@@ -1438,8 +1504,13 @@ Analyze this MAC prefix detection and provide assessment of:
             val spamAnalysis = analyzeBleSpam(appleEvents, "Apple/iOS Popup")
 
             if (spamAnalysis.isLikelySpam) {
+                // Require confirmation before alerting (prevents transient false positives)
+                if (!isSpamConfirmed(BleSpamType.APPLE_POPUP, spamAnalysis)) {
+                    return null  // Still waiting for confirmation
+                }
+
                 lastSpamAlertTime = now
-                Log.w(TAG, "FLIPPER BLE SPAM DETECTED: iOS Popup Attack - " +
+                Log.w(TAG, "FLIPPER BLE SPAM CONFIRMED: iOS Popup Attack - " +
                         "${appleEvents.size} Apple ads from $uniqueMacs sources in ${BLE_SPAM_DETECTION_WINDOW_MS}ms")
 
                 return createBleSpamDetection(
@@ -1457,8 +1528,13 @@ Analyze this MAC prefix detection and provide assessment of:
             val spamAnalysis = analyzeBleSpam(fastPairEvents, "Fast Pair/Android")
 
             if (spamAnalysis.isLikelySpam) {
+                // Require confirmation before alerting (prevents transient false positives)
+                if (!isSpamConfirmed(BleSpamType.FAST_PAIR, spamAnalysis)) {
+                    return null  // Still waiting for confirmation
+                }
+
                 lastSpamAlertTime = now
-                Log.w(TAG, "FLIPPER BLE SPAM DETECTED: Android Fast Pair Attack - " +
+                Log.w(TAG, "FLIPPER BLE SPAM CONFIRMED: Android Fast Pair Attack - " +
                         "${fastPairEvents.size} Fast Pair ads from $uniqueMacs sources in ${BLE_SPAM_DETECTION_WINDOW_MS}ms")
 
                 return createBleSpamDetection(
@@ -1474,9 +1550,6 @@ Analyze this MAC prefix detection and provide assessment of:
             if (nameEvents.size >= DEVICE_NAME_CHANGE_THRESHOLD) {
                 val uniqueNames = nameEvents.map { it.deviceName }.toSet().size
                 if (uniqueNames >= DEVICE_NAME_CHANGE_THRESHOLD) {
-                    lastSpamAlertTime = now
-                    Log.w(TAG, "FLIPPER DEVICE IMPERSONATION: MAC $mac changed names $uniqueNames times")
-
                     val impersonationAnalysis = BleSpamAnalysis(
                         isLikelySpam = true,
                         spamType = "Device Impersonation",
@@ -1491,6 +1564,14 @@ Analyze this MAC prefix detection and provide assessment of:
                         ),
                         threatScore = 85
                     )
+
+                    // Require confirmation before alerting (prevents transient false positives)
+                    if (!isSpamConfirmed(BleSpamType.DEVICE_IMPERSONATION, impersonationAnalysis)) {
+                        continue  // Still waiting for confirmation, check other MACs
+                    }
+
+                    lastSpamAlertTime = now
+                    Log.w(TAG, "FLIPPER DEVICE IMPERSONATION CONFIRMED: MAC $mac changed names $uniqueNames times")
 
                     return createBleSpamDetection(
                         context = context.copy(macAddress = mac),
@@ -1526,38 +1607,47 @@ Analyze this MAC prefix detection and provide assessment of:
         val eventsPerSecond = events.size.toFloat() / (timeSpanMs / 1000f).coerceAtLeast(0.1f)
 
         val suspicionReasons = mutableListOf<String>()
-        var threatScore = 50
+        var threatScore = 40  // Lowered base score (was 50) - require more indicators
 
-        // High event rate is suspicious
-        if (eventsPerSecond > 5f) {
+        // High event rate is suspicious - raised thresholds to reduce false positives
+        if (eventsPerSecond > 8f) {
             suspicionReasons.add("Very high advertisement rate: ${String.format("%.1f", eventsPerSecond)}/sec")
-            threatScore += 20
-        } else if (eventsPerSecond > 2f) {
+            threatScore += 25  // Strong indicator
+        } else if (eventsPerSecond > 4f) {
             suspicionReasons.add("Elevated advertisement rate: ${String.format("%.1f", eventsPerSecond)}/sec")
-            threatScore += 10
+            threatScore += 15
         }
 
         // Many unique MACs broadcasting similar ads is suspicious
-        // (Flipper cycles through random MACs)
-        if (uniqueMacs.size > 5) {
+        // (Flipper cycles through random MACs) - raised threshold
+        if (uniqueMacs.size > 8) {
             suspicionReasons.add("Many unique MAC addresses (${uniqueMacs.size}) - likely MAC randomization")
-            threatScore += 15
-        }
-
-        // Many unique device names is suspicious (impersonation)
-        if (uniqueNames.size > 3) {
-            suspicionReasons.add("Many unique device names (${uniqueNames.size}) - device impersonation")
+            threatScore += 20
+        } else if (uniqueMacs.size > 5) {
+            suspicionReasons.add("Multiple MAC addresses (${uniqueMacs.size})")
             threatScore += 10
         }
 
-        // Single MAC with many events is suspicious (stationary attacker)
-        if (uniqueMacs.size == 1 && events.size > 10) {
-            suspicionReasons.add("Single source flooding: ${events.size} events from one MAC")
+        // Many unique device names is suspicious (impersonation) - raised threshold
+        if (uniqueNames.size > 5) {
+            suspicionReasons.add("Many unique device names (${uniqueNames.size}) - device impersonation")
             threatScore += 15
+        } else if (uniqueNames.size > 3) {
+            suspicionReasons.add("Multiple device names (${uniqueNames.size})")
+            threatScore += 5
         }
 
-        // Determine if this is likely spam
-        val isLikelySpam = suspicionReasons.isNotEmpty() && threatScore >= 60
+        // Single MAC with many events is suspicious (stationary attacker) - raised threshold
+        if (uniqueMacs.size == 1 && events.size > 20) {
+            suspicionReasons.add("Single source flooding: ${events.size} events from one MAC")
+            threatScore += 20
+        } else if (uniqueMacs.size == 1 && events.size > 15) {
+            suspicionReasons.add("Concentrated source: ${events.size} events from one MAC")
+            threatScore += 10
+        }
+
+        // Determine if this is likely spam - raised threshold to reduce false positives
+        val isLikelySpam = suspicionReasons.isNotEmpty() && threatScore >= SPAM_THREAT_SCORE_THRESHOLD
 
         if (isLikelySpam) {
             suspicionReasons.add(0, "ACTIVE BLE SPAM ATTACK DETECTED")

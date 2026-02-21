@@ -7,6 +7,11 @@ import com.flockyou.data.model.ThreatLevel
 import com.flockyou.monitoring.GnssSatelliteMonitor.GnssAnomalyAnalysis
 import com.flockyou.service.CellularMonitor.CellularAnomalyAnalysis
 import com.flockyou.service.RogueWifiMonitor.FollowingNetworkAnalysis
+import com.flockyou.service.RfSignalAnalyzer.RfAnomaly
+import com.flockyou.service.RfSignalAnalyzer.RfAnomalyType
+import com.flockyou.service.RfSignalAnalyzer.AnomalyConfidence
+import com.flockyou.service.RfSignalAnalyzer.HiddenNetworkAnalysis
+import com.flockyou.service.RfSignalAnalyzer.RfEnvironmentStatus
 import com.flockyou.service.UltrasonicDetector.BeaconAnalysis
 
 /**
@@ -347,8 +352,8 @@ Downgrade + New Tower: ${if (analysis.downgradeWithNewTower) "YES - Suspicious" 
 === NETWORK CONTEXT ===
 Network Change: ${analysis.networkGenerationChange ?: "None"}
 LAC/TAC Changed: ${if (analysis.lacTacChanged) "YES - Unusual" else "No"}
-Operator Changed: ${if (analysis.operatorChanged) "YES" else "No"}
-Roaming: ${if (analysis.isRoaming) "Yes" else "No"}
+Operator Changed: ${if (analysis.operatorChanged) "YES - IMSI catchers may present different operator identity" else "No"}
+Roaming: ${if (analysis.isRoaming) "YES - Unexpected roaming can indicate fake base station with foreign MCC-MNC" else "No"}
 $fpSection
 
 Based on this enriched data, provide:
@@ -397,11 +402,63 @@ IMPORTANT: This detection has a ${String.format("%.0f", analysis.falsePositiveLi
 Consider these FP indicators when analyzing. If FP likelihood > 50%, lean toward dismissing as normal GPS behavior."""
         } else ""
 
+        // Fix quality section - satellite count, HDOP/PDOP for context
+        val fixQualitySection = buildString {
+            appendLine("=== FIX QUALITY ===")
+            appendLine("Satellites Visible: ${analysis.totalSatellitesVisible}")
+            appendLine("Satellites Used in Fix: ${analysis.satellitesUsedInFix}")
+            appendLine("Has Fix: ${if (analysis.hasFix) "YES" else "No"}")
+            if (analysis.hdop != null) {
+                appendLine("HDOP: ${String.format("%.1f", analysis.hdop)} ${when {
+                    analysis.hdop!! < 1f -> "(Excellent)"
+                    analysis.hdop!! < 2f -> "(Good)"
+                    analysis.hdop!! < 5f -> "(Moderate)"
+                    analysis.hdop!! < 10f -> "(Fair)"
+                    else -> "(Poor)"
+                }}")
+            } else {
+                appendLine("HDOP: Unavailable (chipset limitation)")
+            }
+            if (analysis.pdop != null) {
+                appendLine("PDOP: ${String.format("%.1f", analysis.pdop)} ${when {
+                    analysis.pdop!! < 1f -> "(Excellent)"
+                    analysis.pdop!! < 2f -> "(Good)"
+                    analysis.pdop!! < 5f -> "(Moderate)"
+                    analysis.pdop!! < 10f -> "(Fair)"
+                    else -> "(Poor)"
+                }}")
+            } else {
+                appendLine("PDOP: Unavailable (chipset limitation)")
+            }
+        }.trimEnd()
+
+        // Environment context section - critical for FP assessment
+        val environmentSection = if (analysis.environmentType != "Unknown") {
+            """
+
+=== ENVIRONMENT CONTEXT ===
+Environment: ${analysis.environmentType} (${String.format("%.0f", analysis.environmentConfidence * 100)}% confidence)
+Guidance: ${analysis.environmentGuidance}
+NOTE: Environmental context is critical for false positive assessment. ${analysis.environmentType} environments commonly cause signal anomalies that mimic attacks."""
+        } else ""
+
+        // Cross-constellation consistency line
+        val crossConstellationLine = when {
+            analysis.missingConstellations.isEmpty() && !analysis.unexpectedConstellation ->
+                "Cross-Constellation Consistency: All constellations consistent"
+            analysis.missingConstellations.isNotEmpty() ->
+                "Cross-Constellation Consistency: Missing ${analysis.missingConstellations.size} expected constellation(s) - possible selective jamming"
+            else ->
+                "Cross-Constellation Consistency: Unexpected constellation detected - anomalous"
+        }
+
         val content = """Analyze this GNSS (GPS/satellite) anomaly detection.
 
 === SPOOFING/JAMMING LIKELIHOOD ===
 Spoofing Likelihood: ${String.format("%.0f", analysis.spoofingLikelihood)}%
 Jamming Likelihood: ${String.format("%.0f", analysis.jammingLikelihood)}%
+
+$fixQualitySection
 
 === CONSTELLATION ANALYSIS ===
 Expected Constellations: ${analysis.expectedConstellations.joinToString { it.code }}
@@ -409,6 +466,7 @@ Observed Constellations: ${analysis.observedConstellations.joinToString { it.cod
 Missing Constellations: ${analysis.missingConstellations.joinToString { it.code }.ifEmpty { "None" }}
 Constellation Match: ${analysis.constellationMatchScore}%
 Unexpected Constellation: ${if (analysis.unexpectedConstellation) "YES" else "No"}
+$crossConstellationLine
 
 === SIGNAL ANALYSIS (C/N0) ===
 Historical Baseline: ${String.format("%.1f", analysis.historicalCn0Mean)} ± ${String.format("%.1f", analysis.historicalCn0StdDev)} dB-Hz
@@ -428,6 +486,7 @@ Cumulative Drift: ${analysis.cumulativeDriftNs / 1_000_000} ms
 Drift Trend: ${analysis.driftTrend.displayName}
 Drift Anomalous: ${if (analysis.driftAnomalous) "YES" else "No"}
 Drift Jumps: ${analysis.driftJumpCount}
+$environmentSection
 $fpSection
 
 === INDICATORS ===
@@ -442,13 +501,15 @@ Based on this enriched data, provide:
 2. What this means for their safety and privacy (if applicable)
 3. The top 3 actions they should take (or "No action needed" if FP)
 4. Whether they should trust their current location on maps
+5. Whether the environmental context supports or contradicts an attack scenario
 
 CRITICAL: If FP Likelihood > 50%, you MUST conclude this is likely NOT an attack.
 Common false positives include: urban multipath (signal reflections off buildings), indoor signal attenuation, normal GPS variation during cold start, transitioning between environments.
+Environmental context (if available) should heavily influence your assessment - indoor/urban canyon environments cause signal anomalies that closely mimic spoofing/jamming.
 
 Format as:
 ## Assessment
-[Your assessment - is GPS being spoofed or jammed? OR why this is likely a false positive]
+[Your assessment - is GPS being spoofed or jammed? OR why this is likely a false positive. Factor in environment context.]
 
 ## Impact
 [What this means for the user - OR "Likely no impact - normal GPS behavior"]
@@ -459,7 +520,7 @@ Format as:
 3. [Action 3]
 
 ## Location Trustworthiness
-[Can they trust their GPS right now?]"""
+[Can they trust their GPS right now? Reference fix quality and satellite count.]"""
 
         return wrapGemmaPrompt(content)
     }
@@ -492,6 +553,9 @@ Frequency: ${analysis.frequencyHz} Hz
 Beacon Type: ${analysis.matchedSource.displayName}
 Category: ${analysis.sourceCategory.displayName}
 Source Confidence: ${String.format("%.0f", analysis.sourceConfidence)}%
+Frequency Stable: ${if (analysis.isFrequencyStable) "YES (within +/-10Hz - beacon characteristic)" else "No (drifting - may be environmental noise)"}
+Frequency Stability: ${String.format("%.1f", analysis.frequencyStabilityHz)} Hz variance
+${if (analysis.hasKnownModulationPattern) "Modulation Pattern: ${analysis.modulationPatternType} (data encoding detected)" else "Modulation Pattern: None detected"}
 
 === AMPLITUDE ANALYSIS ===
 Peak Amplitude: ${String.format("%.1f", analysis.peakAmplitudeDb)} dB
@@ -502,14 +566,21 @@ SNR: ${String.format("%.1f", analysis.snrDb)} dB
 
 === CROSS-LOCATION TRACKING ===
 Following User: ${if (analysis.followingUser) "YES - Detected at multiple of your locations" else "No"}
+Cross-Location Following: ${if (analysis.isFollowingAcrossLocations) "YES - Same beacon seen at home and other locations" else "No"}
 Locations Detected: ${analysis.locationsDetected}
 Total Detections: ${analysis.totalDetectionCount}
 Detection Duration: ${analysis.detectionDurationMs / 60000} minutes
 Persistence Score: ${String.format("%.0f", analysis.persistenceScore * 100)}%
 
 === ENVIRONMENT CONTEXT ===
+Environment: ${analysis.environmentalContext.displayName}
 Noise Floor: ${String.format("%.1f", analysis.noiseFloorDb)} dB
 $fpSection
+
+=== SOURCE INTELLIGENCE ===
+Probable Source: ${analysis.probableSourceDescription.ifEmpty { "Unknown" }}
+What It Does: ${analysis.whatItDoes.ifEmpty { "Unknown" }}
+Recommended Action: ${analysis.recommendedAction.ifEmpty { "Monitor and verify" }}
 
 === RISK ASSESSMENT ===
 Tracking Likelihood: ${String.format("%.0f", analysis.trackingLikelihood)}%
@@ -630,11 +701,49 @@ Format as:
 
     /**
      * Build a prompt for satellite/NTN detection analysis with enriched data.
+     *
+     * The enriched data covers all 9 SatellitePattern types:
+     * - UNEXPECTED_SATELLITE: hasTerrestrialCoverage, isUrbanArea, lastTerrestrialSignalDbm
+     * - FORCED_HANDOFF: recentHandoffCount, timeSinceGoodTerrestrialMs
+     * - SUSPICIOUS_NTN_PARAMS: orbitalType, expectedRtt, measuredRtt, ntnBand, harqProcessCount
+     * - UNKNOWN_SATELLITE_NETWORK: provider identification
+     * - SATELLITE_IN_COVERAGE: hasTerrestrialCoverage, lastTerrestrialSignalDbm
+     * - RAPID_SATELLITE_SWITCHING: recentHandoffCount
+     * - NTN_BAND_MISMATCH: isValidNtnBand, frequency, ntnBand
+     * - TIMING_ANOMALY: measuredRtt, expectedRtt, orbitalType
+     * - DOWNGRADE_TO_SATELLITE: detectionMethod, hasTerrestrialCoverage
      */
     fun buildSatelliteEnrichedPrompt(
         detection: Detection,
         enrichedData: EnrichedDetectorData.Satellite
     ): String {
+        // Extract key context fields for targeted analysis guidance
+        val provider = enrichedData.metadata["provider"] ?: "Unknown"
+        val anomalyType = enrichedData.metadata["anomalyType"] ?: "Unknown"
+        val hasTerrestrial = enrichedData.metadata["hasTerrestrialCoverage"] == "true"
+        val isUrban = enrichedData.metadata["isUrbanArea"] == "true"
+        val isValidBand = enrichedData.metadata["isValidNtnBand"] != "false"
+        val measuredRtt = enrichedData.signalCharacteristics["measuredRtt"]
+        val orbitalType = enrichedData.signalCharacteristics["orbitalType"]
+
+        // Build context-specific analysis guidance based on the anomaly type
+        val contextGuidance = when {
+            anomalyType.contains("TIMING") || anomalyType.contains("RTT") ->
+                "Focus on timing analysis: compare measured RTT against expected range for the claimed orbit type. RTT <15ms is physically impossible from space."
+            anomalyType.contains("BAND") || anomalyType.contains("NRARFCN") ->
+                "Focus on frequency analysis: verify whether the reported frequency/ARFCN falls within valid 3GPP NTN bands (L-band n253-n255: 1525-1660MHz, S-band n256: 1980-2200MHz)."
+            anomalyType.contains("FORCED") || anomalyType.contains("HANDOFF") || anomalyType.contains("DOWNGRADE") ->
+                "Focus on handoff analysis: assess whether the satellite transition was justified given terrestrial coverage availability."
+            anomalyType.contains("UNKNOWN") ->
+                "Focus on provider identification: unknown satellite networks are high-priority since legitimate providers are well-documented."
+            anomalyType.contains("SWITCHING") || anomalyType.contains("RAPID") ->
+                "Focus on switching pattern: frequent handoffs may indicate interference, jamming, or cell site simulator activity."
+            hasTerrestrial && isUrban ->
+                "Focus on coverage context: satellite in urban area with terrestrial coverage is unusual and warrants investigation."
+            else ->
+                "Provide a balanced analysis considering both legitimate NTN usage and potential surveillance indicators."
+        }
+
         val content = """Analyze this satellite/NTN (Non-Terrestrial Network) detection for potential surveillance.
 
 === DETECTION INFO ===
@@ -648,17 +757,31 @@ ${if (detection.latitude != null && detection.longitude != null) "Location: ${St
 Detector Type: ${enrichedData.detectorType}
 ${enrichedData.signalCharacteristics.entries.joinToString("\n") { "${it.key}: ${it.value}" }}
 
+=== NTN CONTEXT ===
+Provider: $provider
+${if (orbitalType != null && orbitalType != "unknown") "Orbital Type: $orbitalType" else ""}
+${if (measuredRtt != null && measuredRtt != "unknown") "Measured RTT: ${measuredRtt}ms" else ""}
+Terrestrial Coverage Available: $hasTerrestrial
+Urban Area: $isUrban
+Valid NTN Band: $isValidBand
+
 === METADATA ===
 ${enrichedData.metadata.entries.joinToString("\n") { "${it.key}: ${it.value}" }}
 
 === RISK INDICATORS ===
 ${enrichedData.riskIndicators.joinToString("\n") { "- $it" }.ifEmpty { "- None identified" }}
 
+=== ANALYSIS GUIDANCE ===
+$contextGuidance
+
+IMPORTANT CONTEXT: T-Mobile Starlink and Skylo NTN are legitimate commercial satellite services. A satellite connection from a known provider is NOT inherently suspicious. Focus on WHY the satellite connection occurred (forced handoff? good terrestrial coverage available? timing anomalies?) rather than the mere presence of satellite connectivity.
+
 Based on this enriched satellite/NTN data, provide:
-1. Assessment of whether this indicates unauthorized satellite tracking
+1. Assessment of whether this indicates unauthorized satellite tracking or interception
 2. The likely origin and purpose of this satellite signal
-3. Risk level for the user
-4. Recommended actions
+3. Whether this is consistent with legitimate NTN usage or anomalous behavior
+4. Risk level for the user
+5. Recommended actions
 
 Format as:
 ## Assessment
@@ -666,6 +789,9 @@ Format as:
 
 ## Signal Analysis
 [Technical analysis of the satellite characteristics]
+
+## Legitimate vs Anomalous
+[Is this consistent with normal satellite connectivity, or are there anomalies?]
 
 ## Risk Level
 [Overall risk assessment]
@@ -676,6 +802,243 @@ Format as:
 3. [Action 3]"""
 
         return wrapGemmaPrompt(content)
+    }
+
+    // ==================== BLE ENRICHED PROMPT ====================
+
+    /**
+     * Build an enriched prompt for BLE device detections.
+     *
+     * Provides detailed BLE context including device identification, signal analysis,
+     * tracker following patterns, BLE spam characteristics, and false positive indicators.
+     */
+    fun buildBleEnrichedPrompt(
+        detection: Detection,
+        analysis: BleAnalysisData
+    ): String {
+        val fpSection = if (analysis.falsePositiveLikelihood > 30f) {
+            """
+
+=== FALSE POSITIVE ANALYSIS ===
+FP Likelihood: ${String.format("%.0f", analysis.falsePositiveLikelihood)}%
+Likely Consumer Device: ${if (analysis.isLikelyConsumerDevice) "YES - Common consumer BLE device" else "No"}
+Likely Own Device: ${if (analysis.isLikelyOwnDevice) "YES - Appears to be user's own device" else "No"}
+Passing By: ${if (analysis.isPassingBy) "YES - Weak/transient signal, likely not targeting you" else "No"}
+FP Indicators:
+${analysis.fpIndicators.joinToString("\n") { "- $it" }.ifEmpty { "- None" }}
+
+IMPORTANT: This detection has a ${String.format("%.0f", analysis.falsePositiveLikelihood)}% chance of being a FALSE POSITIVE.
+Consider these FP indicators when analyzing. If FP likelihood > 50%, lean toward benign explanation."""
+        } else ""
+
+        val trackerSection = if (analysis.isTrackerDevice) {
+            """
+
+=== TRACKER FOLLOWING ANALYSIS ===
+Following User: ${if (analysis.isFollowingUser) "YES - Detected at ${analysis.distinctLocationCount} distinct locations" else "No"}
+Sightings: ${analysis.trackerSightingCount}
+Distinct Locations: ${analysis.distinctLocationCount}
+Duration: ${analysis.durationMinutes} minutes
+Average Signal: ${analysis.averageRssi} dBm
+Signal Variance: ${String.format("%.1f", analysis.rssiVariance)}
+Possession Signal: ${if (analysis.isPossessionSignal) "YES - Strong consistent signal suggests tracker is on your person or in your belongings" else "No"}
+Suspicion Score: ${analysis.suspicionScore}/100
+${if (analysis.suspicionReasons.isNotEmpty()) "Suspicion Indicators:\n${analysis.suspicionReasons.joinToString("\n") { "- $it" }}" else ""}"""
+        } else ""
+
+        val spamSection = if (analysis.isBleSpam) {
+            """
+
+=== BLE SPAM ATTACK ANALYSIS ===
+Spam Type: ${analysis.spamType ?: "Unknown"}
+Total Events: ${analysis.spamEventsCount}
+Rate: ${String.format("%.1f", analysis.spamEventsPerSecond)} events/second
+This indicates an active BLE spam attack, likely from a Flipper Zero or similar device."""
+        } else ""
+
+        val content = """Analyze this Bluetooth Low Energy (BLE) surveillance detection.
+
+=== DEVICE IDENTIFICATION ===
+Device Name: ${sanitize(analysis.deviceName) ?: "Unknown"}
+MAC Address: ${sanitize(analysis.macAddress)}
+Manufacturer: ${sanitize(analysis.manufacturer) ?: "Unknown"}
+Device Category: ${analysis.deviceCategory.displayName}
+Device Type: ${detection.deviceType.displayName}
+Detection Method: ${detection.detectionMethod.displayName}
+
+=== SIGNAL CHARACTERISTICS ===
+RSSI: ${analysis.rssi} dBm (${detection.signalStrength.displayName})
+Advertising Rate: ${String.format("%.1f", analysis.advertisingRate)} packets/sec
+Connectable: ${if (analysis.isConnectable) "Yes" else "No"}
+${analysis.txPowerLevel?.let { "TX Power Level: $it dBm" } ?: ""}
+${analysis.estimatedDistanceMeters?.let { "Estimated Distance: ${String.format("%.1f", it)} meters" } ?: ""}
+
+=== BLE SERVICE & MANUFACTURER DATA ===
+Service UUIDs: ${if (analysis.serviceUuids.isNotEmpty()) analysis.serviceUuids.joinToString(", ") else "(none)"}
+Manufacturer IDs: ${if (analysis.manufacturerIds.isNotEmpty()) analysis.manufacturerIds.joinToString(", ") { "0x${"%04X".format(it)}" } else "(none)"}
+$trackerSection
+$spamSection
+$fpSection
+
+Based on this enriched BLE data, provide:
+1. A plain-English explanation of what this device is and what it does - OR explain why this is likely a false positive
+2. Whether this device poses a genuine privacy/surveillance threat
+3. The top 3 SPECIFIC actions the user should take (or "No action needed" if FP)
+4. What data this device may be collecting about the user (or "No data at risk" if FP)
+
+CRITICAL: If FP Likelihood > 50%, you MUST conclude this is likely NOT a surveillance device.
+Common BLE false positives include: neighbor's smart home devices, passing pedestrians' trackers, consumer IoT devices, retail beacons in stores, fitness wearables.
+
+Format as:
+## Assessment
+[Your assessment - what is this device? OR why this is likely a false positive]
+
+## Privacy Risk
+[Privacy implications - OR "Likely no privacy risk - benign BLE device"]
+
+## Actions
+1. [Action 1 - OR "No action needed"]
+2. [Action 2]
+3. [Action 3]
+
+## Data Collection
+[What data may be collected - OR "No data at risk - likely normal BLE device"]"""
+
+        return wrapGemmaPrompt(content)
+    }
+
+    // ==================== WIFI SSID MATCH ENRICHED PROMPT ====================
+
+    /** Build an enriched prompt for standard WiFi SSID/MAC pattern match detections. */
+    fun buildWifiSsidEnrichedPrompt(detection: Detection, enrichedData: EnrichedDetectorData.WifiSsidMatch): String {
+        val proximityAssessment = when {
+            enrichedData.rssiDbm > -40 -> "VERY CLOSE: Device within 5-10 meters"
+            enrichedData.rssiDbm > -50 -> "CLOSE: Device within 10-25 meters"
+            enrichedData.rssiDbm > -65 -> "MODERATE: Device within 25-50 meters"
+            enrichedData.rssiDbm > -80 -> "FAR: Device approximately 50-100 meters away"
+            else -> "VERY FAR: Device more than 100 meters away"
+        }
+        val envNote = when {
+            enrichedData.nearbyApCount > 30 -> "Dense WiFi environment (${enrichedData.nearbyApCount} APs)"
+            enrichedData.nearbyApCount < 5 -> "Sparse WiFi environment (${enrichedData.nearbyApCount} APs)"
+            else -> "Normal WiFi density (${enrichedData.nearbyApCount} APs)"
+        }
+        return wrapGemmaPrompt("""Analyze this WiFi surveillance device detection matched via ${enrichedData.detectionMethodName}.
+
+=== DETECTION INFO ===
+Device Type: ${detection.deviceType.displayName}
+Threat Level: ${detection.threatLevel.displayName}
+Threat Score: ${detection.threatScore}/100
+
+=== NETWORK CHARACTERISTICS ===
+SSID: ${enrichedData.ssid.ifEmpty { "(Hidden Network)" }}
+BSSID (MAC): ${enrichedData.bssid}
+Channel: ${enrichedData.channel} (${enrichedData.frequencyMhz} MHz, ${enrichedData.frequencyBand})
+Security/Capabilities: ${enrichedData.capabilities}
+Signal Strength: ${enrichedData.rssiDbm} dBm
+Hidden Network: ${if (enrichedData.isHidden) "YES" else "No"}
+
+=== IDENTIFICATION ===
+OUI Vendor: ${enrichedData.ouiVendor ?: "Unknown"}
+Pattern Manufacturer: ${enrichedData.patternManufacturer ?: "Unknown"}
+Pattern Match: ${enrichedData.matchedPatternDescription}
+
+=== ENVIRONMENT ===
+$envNote
+Proximity: $proximityAssessment
+
+Provide:
+1. Assessment of what this device is and its surveillance capabilities
+2. Whether the signal strength and environment suggest this is nearby or distant
+3. Privacy implications specific to this device type
+4. Recommended actions for the user""")
+    }
+
+    // ==================== RF ENVIRONMENT ENRICHED PROMPT ====================
+
+    /**
+     * Build an enriched prompt for RF environment anomaly detections.
+     *
+     * Most RF detections are inferred from WiFi scan data rather than true RF
+     * spectrum analysis (which requires SDR hardware like Flipper Zero). The
+     * prompt communicates this limitation to the LLM.
+     */
+    fun buildRfEnvironmentEnrichedPrompt(
+        detection: Detection,
+        enrichedData: EnrichedDetectorData.RfEnvironment
+    ): String {
+        val sb = StringBuilder()
+        sb.appendLine("Analyze this RF environment anomaly.")
+        sb.appendLine()
+        sb.appendLine("=== RF ANOMALY ===")
+        sb.appendLine("Type: ${enrichedData.anomalyType}")
+        sb.appendLine("Confidence: ${enrichedData.anomalyConfidence}")
+        sb.appendLine("Score: ${enrichedData.rfThreatScore}/100")
+        sb.appendLine("Method: ${if (enrichedData.isWifiProxyBased) "WiFi-proxy (LIMITED)" else "Direct RF"}")
+        sb.appendLine("Networks: ${enrichedData.totalNetworks} total, ${enrichedData.hiddenNetworkCount} hidden")
+        sb.appendLine("Signal: ${enrichedData.avgSignalStrength} dBm, variance ${String.format("%.1f", enrichedData.signalVariance)}")
+
+        enrichedData.hiddenNetworkAnalysis?.let { a ->
+            sb.appendLine()
+            sb.appendLine("=== HIDDEN NETWORK ANALYSIS ===")
+            sb.appendLine("Hidden vs Visible: ${a.hiddenAvgSignalStrength} dBm vs ${a.visibleAvgSignalStrength} dBm")
+            sb.appendLine("Hidden Stronger: ${if (a.hiddenSignalStrongerThanVisible) "YES" else "No"}")
+            sb.appendLine("Variance: ${String.format("%.1f", a.hiddenSignalVariance)}${if (a.hiddenSignalVariance < 50f) " (LOW - same hardware)" else ""}")
+            sb.appendLine("Surveillance OUIs: ${a.knownSurveillanceOuiCount}")
+            sb.appendLine("Channel Concentration: ${if (a.channelConcentration) "YES" else "No"}")
+            sb.appendLine("Simultaneous Appearance: ${if (a.simultaneousAppearance) "YES" else "No"}")
+        }
+
+        enrichedData.environmentStatus?.let { s ->
+            sb.appendLine()
+            sb.appendLine("=== ENVIRONMENT ===")
+            sb.appendLine("Noise: ${s.noiseLevel.displayName}, Jammer: ${if (s.jammerSuspected) "YES" else "No"}")
+            sb.appendLine("Drones: ${s.dronesDetected}, Cameras: ${s.surveillanceCameras}")
+            sb.appendLine("Risk: ${s.environmentRisk.displayName}")
+        }
+
+        sb.appendLine()
+        sb.appendLine("=== FACTORS ===")
+        if (enrichedData.contributingFactors.isNotEmpty()) {
+            enrichedData.contributingFactors.forEach { sb.appendLine("- $it") }
+        } else {
+            sb.appendLine("- None")
+        }
+
+        if (enrichedData.falsePositiveLikelihood > 30f) {
+            sb.appendLine()
+            sb.appendLine("=== FALSE POSITIVE ANALYSIS ===")
+            sb.appendLine("FP Likelihood: ${String.format("%.0f", enrichedData.falsePositiveLikelihood)}%")
+            if (enrichedData.fpIndicators.isNotEmpty()) {
+                enrichedData.fpIndicators.forEach { sb.appendLine("- $it") }
+            }
+            sb.appendLine("IMPORTANT: ${String.format("%.0f", enrichedData.falsePositiveLikelihood)}% chance of FALSE POSITIVE.")
+            if (enrichedData.isWifiProxyBased) {
+                sb.appendLine("Based on WiFi data, not direct RF measurement.")
+            }
+        }
+
+        if (enrichedData.isWifiProxyBased) {
+            sb.appendLine()
+            sb.appendLine("NOTE: WiFi proxy cannot detect true RF jamming, sub-GHz signals, or perform spectrum analysis without SDR hardware.")
+        }
+
+        sb.appendLine()
+        sb.appendLine("Provide:")
+        sb.appendLine("1. Is this genuine surveillance or false positive?")
+        sb.appendLine("2. Privacy impact")
+        sb.appendLine("3. Recommended actions")
+        sb.appendLine()
+        sb.appendLine("Format as:")
+        sb.appendLine("## Assessment")
+        sb.appendLine("[Analysis or why likely normal]")
+        sb.appendLine()
+        sb.appendLine("## Actions")
+        sb.appendLine("1. [Action or \"No action needed\"]")
+        sb.appendLine("2. [Action 2]")
+        sb.appendLine("3. [Action 3]")
+
+        return wrapGemmaPrompt(sb.toString())
     }
 
     // ==================== USER-FRIENDLY EXPLANATION PROMPTS ====================
@@ -805,9 +1168,17 @@ ${if (a.isLikelyIndoorSignalLoss) "⚠️ LIKELY INDOOR SIGNAL ATTENUATION" else
 Beacon Type: ${a.matchedSource.displayName}
 Category: ${a.sourceCategory.displayName}
 Frequency: ${a.frequencyHz} Hz
+Amplitude: ${String.format("%.1f", a.peakAmplitudeDb)} dB peak, ${String.format("%.1f", a.avgAmplitudeDb)} dB avg
+SNR: ${String.format("%.1f", a.snrDb)} dB
+Amplitude Profile: ${a.amplitudeProfile.displayName}
+Frequency Stable: ${if (a.isFrequencyStable) "YES" else "No (${String.format("%.1f", a.frequencyStabilityHz)}Hz drift)"}
+${if (a.hasKnownModulationPattern) "Modulation: ${a.modulationPatternType}" else ""}
+Environment: ${a.environmentalContext.displayName}
 Cross-Location: ${if (a.followingUser) "YES - ${a.locationsDetected} locations" else "No"}
+${if (a.isFollowingAcrossLocations) "⚠️ FOLLOWING ACROSS HOME + OTHER LOCATIONS" else ""}
 Tracking Likelihood: ${String.format("%.0f", a.trackingLikelihood)}%
 Persistence: ${String.format("%.0f", a.persistenceScore * 100)}%
+Duration: ${a.detectionDurationMs / 1000}s, ${a.totalDetectionCount} detections
 ${if (a.falsePositiveLikelihood > 30f) "⚠️ FP LIKELIHOOD: ${String.format("%.0f", a.falsePositiveLikelihood)}% - MAY BE NOISE" else ""}
 ${if (a.isLikelyAmbientNoise) "⚠️ LIKELY AMBIENT NOISE (${a.concurrentBeaconCount} concurrent beacons)" else ""}
 ${if (a.isLikelyDeviceArtifact) "⚠️ LIKELY DEVICE ARTIFACT" else ""}"""
@@ -831,9 +1202,79 @@ ${if (a.isLikelyCommuterDevice) "⚠️ LIKELY COMMUTER ON SAME ROUTE" else ""}"
 === ENRICHED SATELLITE/NTN DATA ===
 Detector Type: ${data.detectorType}
 Timestamp: ${formatTimestamp(data.timestamp)}
+Provider: ${data.metadata["provider"] ?: "Unknown"}
+Anomaly: ${data.metadata["anomalyType"] ?: "Unknown"} (${data.metadata["anomalySeverity"] ?: "Unknown"})
+${data.metadata["satelliteId"]?.let { "Satellite ID: $it" } ?: ""}
 ${data.signalCharacteristics.entries.joinToString("\n") { "${it.key}: ${it.value}" }}
+${data.metadata["hasTerrestrialCoverage"]?.let { "Terrestrial Coverage: $it" } ?: ""}
+${data.metadata["isUrbanArea"]?.let { "Urban Area: $it" } ?: ""}
+${data.metadata["recentHandoffCount"]?.let { "Recent Handoffs: $it" } ?: ""}
 ${if (data.riskIndicators.isNotEmpty()) "⚠️ RISK INDICATORS: ${data.riskIndicators.joinToString(", ")}" else ""}
+NOTE: T-Mobile Starlink and Skylo are legitimate NTN services
 ${data.metadata.entries.joinToString("\n") { "${it.key}: ${it.value}" }}"""
+            }
+            is EnrichedDetectorData.RfEnvironment -> {
+                val hiddenAnalysis = data.hiddenNetworkAnalysis
+                val envStatus = data.environmentStatus
+                """
+=== ENRICHED RF ENVIRONMENT DATA ===
+Anomaly Type: ${data.anomalyType}
+Confidence: ${data.anomalyConfidence}
+Description: ${data.anomalyDescription}
+RF Threat Score: ${data.rfThreatScore}/100
+Detection Method: ${if (data.isWifiProxyBased) "WiFi-proxy inference (not true RF measurement)" else "Direct RF measurement"}
+Total Networks: ${data.totalNetworks}
+Hidden Networks: ${data.hiddenNetworkCount} (${if (data.totalNetworks > 0) String.format("%.0f", data.hiddenNetworkCount.toFloat() / data.totalNetworks * 100) else "0"}%)
+Avg Signal: ${data.avgSignalStrength} dBm
+Signal Variance: ${String.format("%.1f", data.signalVariance)}
+${if (data.suspiciousPatterns.isNotEmpty()) "Suspicious Patterns: ${data.suspiciousPatterns.joinToString(", ")}" else ""}
+${if (hiddenAnalysis != null) """Hidden Network Analysis:
+  Hidden vs Visible Signal: ${hiddenAnalysis.hiddenAvgSignalStrength} dBm vs ${hiddenAnalysis.visibleAvgSignalStrength} dBm
+  ${if (hiddenAnalysis.hiddenSignalStrongerThanVisible) "WARNING: HIDDEN SIGNALS STRONGER THAN VISIBLE" else ""}
+  Signal Variance: ${String.format("%.1f", hiddenAnalysis.hiddenSignalVariance)} (${if (hiddenAnalysis.hiddenSignalVariance < 50f) "LOW - same hardware likely" else "normal"})
+  ${if (hiddenAnalysis.channelConcentration) "WARNING: CHANNEL CONCENTRATION DETECTED" else ""}
+  Surveillance Vendor OUIs: ${hiddenAnalysis.knownSurveillanceOuiCount}
+  ${if (hiddenAnalysis.simultaneousAppearance) "WARNING: SIMULTANEOUS APPEARANCE OF HIDDEN NETWORKS" else ""}""" else ""}
+${if (envStatus != null) """Environment Status:
+  Noise Level: ${envStatus.noiseLevel.displayName}
+  Jammer Suspected: ${envStatus.jammerSuspected}
+  Drones Detected: ${envStatus.dronesDetected}
+  Surveillance Cameras: ${envStatus.surveillanceCameras}
+  Environment Risk: ${envStatus.environmentRisk.displayName}""" else ""}
+${if (data.falsePositiveLikelihood > 30f) "FP LIKELIHOOD: ${String.format("%.0f", data.falsePositiveLikelihood)}% - MAY BE NORMAL RF ENVIRONMENT" else ""}
+${if (data.fpIndicators.isNotEmpty()) "FP Indicators: ${data.fpIndicators.joinToString(", ")}" else ""}
+Contributing Factors:
+${data.contributingFactors.joinToString("\n") { "- $it" }.ifEmpty { "- None" }}"""
+            }
+            is EnrichedDetectorData.Ble -> {
+                val a = data.analysis
+                """
+=== ENRICHED BLE DATA ===
+Device: ${a.deviceName ?: "Unknown"} (${a.deviceCategory.displayName})
+MAC: ${a.macAddress}
+Manufacturer: ${a.manufacturer ?: "Unknown"}
+Signal: ${a.rssi} dBm${a.estimatedDistanceMeters?.let { " (~${String.format("%.1f", it)}m)" } ?: ""}
+Advertising Rate: ${String.format("%.1f", a.advertisingRate)} pps
+Connectable: ${a.isConnectable}
+${if (a.isTrackerDevice && a.isFollowingUser) "FOLLOWING: Detected at ${a.distinctLocationCount} locations over ${a.durationMinutes} min (suspicion: ${a.suspicionScore}/100)" else ""}
+${if (a.isTrackerDevice && a.isPossessionSignal) "POSSESSION: Strong consistent signal suggests tracker on person/in belongings" else ""}
+${if (a.isBleSpam) "BLE SPAM: ${a.spamType} attack - ${a.spamEventsCount} events at ${String.format("%.1f", a.spamEventsPerSecond)}/sec" else ""}
+${if (a.falsePositiveLikelihood > 30f) "FP LIKELIHOOD: ${String.format("%.0f", a.falsePositiveLikelihood)}% - ${if (a.isLikelyConsumerDevice) "LIKELY CONSUMER DEVICE" else if (a.isPassingBy) "LIKELY PASSING BY" else if (a.isLikelyOwnDevice) "LIKELY OWN DEVICE" else "MAY BE BENIGN"}" else ""}"""
+            }
+            is EnrichedDetectorData.WifiSsidMatch -> {
+                """
+=== ENRICHED WIFI SSID MATCH DATA ===
+SSID: ${data.ssid.ifEmpty { "(Hidden)" }}
+BSSID: ${data.bssid}
+Channel: ${data.channel} (${data.frequencyMhz} MHz, ${data.frequencyBand})
+Security: ${data.capabilities}
+Signal: ${data.rssiDbm} dBm
+Hidden Network: ${if (data.isHidden) "YES" else "No"}
+OUI Vendor: ${data.ouiVendor ?: "Unknown"}
+Detection Method: ${data.detectionMethodName}
+Pattern Match: ${data.matchedPatternDescription}
+Pattern Manufacturer: ${data.patternManufacturer ?: "Unknown"}
+Nearby AP Count: ${data.nearbyApCount} (environment density)"""
             }
         }
     }
@@ -1187,6 +1628,38 @@ If no significant patterns, state "No coordinated patterns detected" and explain
                     indicators.add("Movement pattern suggests vehicle-mounted device")
                 }
             }
+            is EnrichedDetectorData.RfEnvironment -> {
+                indicators.add("RF anomaly: ${enrichedData.anomalyType} (${enrichedData.anomalyConfidence})")
+                if (enrichedData.hiddenNetworkAnalysis?.hiddenSignalStrongerThanVisible == true) {
+                    indicators.add("Hidden networks have stronger signals than visible (surveillance indicator)")
+                }
+                if (enrichedData.hiddenNetworkAnalysis?.simultaneousAppearance == true) {
+                    indicators.add("Multiple hidden networks appeared simultaneously (coordinated deployment)")
+                }
+                if (enrichedData.environmentStatus?.jammerSuspected == true) {
+                    indicators.add("Sustained WiFi signal drop pattern consistent with RF jamming")
+                }
+                enrichedData.contributingFactors.take(3).forEach { indicators.add(it) }
+                if (enrichedData.isWifiProxyBased) {
+                    indicators.add("Note: Detection inferred from WiFi data, not direct RF measurement")
+                }
+            }
+            is EnrichedDetectorData.Ble -> {
+                val analysis = enrichedData.analysis
+                if (analysis.isFollowingUser) {
+                    indicators.add("FOLLOWING: Tracker detected at ${analysis.distinctLocationCount} distinct locations")
+                }
+                if (analysis.isPossessionSignal) {
+                    indicators.add("Strong consistent signal (${analysis.averageRssi} dBm) suggests device on your person")
+                }
+                if (analysis.isBleSpam) {
+                    indicators.add("BLE spam attack: ${analysis.spamEventsCount} events at ${String.format("%.1f", analysis.spamEventsPerSecond)}/sec")
+                }
+                if (analysis.advertisingRate > 10f) {
+                    indicators.add("Elevated advertising rate: ${String.format("%.1f", analysis.advertisingRate)} pps (normal ~1 pps)")
+                }
+                analysis.suspicionReasons.take(3).forEach { indicators.add(it) }
+            }
             else -> {}
         }
 
@@ -1240,6 +1713,13 @@ If no significant patterns, state "No coordinated patterns detected" and explain
                 val analysis = enrichedData.analysis
                 confidence = analysis.trackingLikelihood.toInt()
                 reasons.add("Tracking likelihood: ${analysis.trackingLikelihood.toInt()}%")
+            }
+            is EnrichedDetectorData.RfEnvironment -> {
+                confidence = enrichedData.rfThreatScore
+                reasons.add("RF threat score: ${enrichedData.rfThreatScore}%")
+                if (enrichedData.isWifiProxyBased) {
+                    reasons.add("Inferred from WiFi data (indirect measurement)")
+                }
             }
             else -> {}
         }
@@ -1317,6 +1797,12 @@ If no significant patterns, state "No coordinated patterns detected" and explain
                     reasons.add("Public transit WiFi you use regularly")
                 }
                 reasons.addAll(analysis.fpIndicators)
+            }
+            is EnrichedDetectorData.RfEnvironment -> {
+                reasons.addAll(enrichedData.fpIndicators)
+                if (enrichedData.isWifiProxyBased) {
+                    reasons.add("Detection based on WiFi proxy data, not direct RF measurement")
+                }
             }
             else -> {
                 // Generic false positive reasons based on device type
@@ -1529,6 +2015,18 @@ If no significant patterns, state "No coordinated patterns detected" and explain
                 details.appendLine("Time Pattern: ${a.timePattern.displayName}")
                 details.appendLine("Signal Consistency: ${String.format("%.0f", a.signalConsistency * 100)}%")
             }
+            is EnrichedDetectorData.RfEnvironment -> {
+                details.appendLine("\n=== RF Environment Analysis ===")
+                details.appendLine("Anomaly Type: ${enrichedData.anomalyType}")
+                details.appendLine("Confidence: ${enrichedData.anomalyConfidence}")
+                details.appendLine("RF Threat Score: ${enrichedData.rfThreatScore}%")
+                details.appendLine("Total Networks: ${enrichedData.totalNetworks}")
+                details.appendLine("Hidden Networks: ${enrichedData.hiddenNetworkCount}")
+                details.appendLine("Avg Signal: ${enrichedData.avgSignalStrength} dBm")
+                details.appendLine("Signal Variance: ${String.format("%.1f", enrichedData.signalVariance)}")
+                details.appendLine("WiFi Proxy Based: ${enrichedData.isWifiProxyBased}")
+                details.appendLine("False Positive Likelihood: ${String.format("%.0f", enrichedData.falsePositiveLikelihood)}%")
+            }
             else -> {}
         }
 
@@ -1545,6 +2043,8 @@ If no significant patterns, state "No coordinated patterns detected" and explain
             is EnrichedDetectorData.Gnss -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
             is EnrichedDetectorData.Ultrasonic -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
             is EnrichedDetectorData.WifiFollowing -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
+            is EnrichedDetectorData.RfEnvironment -> return enrichedData.falsePositiveLikelihood.toInt()
+            is EnrichedDetectorData.Ble -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
             else -> {}
         }
 
@@ -1604,6 +2104,20 @@ If no significant patterns, state "No coordinated patterns detected" and explain
                         "GPS signal blockage pattern consistent with intentional jamming"
                     else ->
                         "GPS anomalies detected but may be environmental"
+                }
+            }
+            is EnrichedDetectorData.RfEnvironment -> {
+                when {
+                    enrichedData.environmentStatus?.jammerSuspected == true ->
+                        "Sustained WiFi signal loss pattern suggests active RF jamming. " +
+                        "Note: inferred from WiFi data, not direct RF measurement"
+                    enrichedData.hiddenNetworkAnalysis?.hiddenSignalStrongerThanVisible == true &&
+                        enrichedData.hiddenNetworkAnalysis?.simultaneousAppearance == true ->
+                        "Coordinated hidden network deployment detected with strong signals"
+                    enrichedData.rfThreatScore > 70 ->
+                        "Multiple RF environment indicators suggest surveillance activity"
+                    else ->
+                        "RF environment anomaly detected but may be normal urban conditions"
                 }
             }
             else -> ""
@@ -2255,4 +2769,160 @@ sealed class EnrichedDetectorData {
         val riskIndicators: List<String>,
         val timestamp: Long
     ) : EnrichedDetectorData()
+
+    /**
+     * Enriched RF environment data for LLM analysis.
+     *
+     * Captures the RF environment context when an RF anomaly is detected, including
+     * signal characteristics, hidden network analysis, anomaly details, and
+     * environmental status. This enables the LLM to provide more accurate and
+     * contextual analysis of RF detections.
+     *
+     * Note on detection feasibility:
+     * - JAMMER: Inferred indirectly from WiFi signal loss patterns (not true RF measurement)
+     * - DRONE: Detected via WiFi OUI/SSID matching (limited to controllers with WiFi)
+     * - SURVEILLANCE_AREA: Detected via camera vendor OUI counts (high urban FP rate)
+     * - SPECTRUM_ANOMALY: Inferred from WiFi signal statistics (not true spectrum analysis)
+     * - HIDDEN_TRANSMITTER: Inferred from hidden WiFi networks (not true RF sweep)
+     * - SUB_GHZ: Requires Flipper Zero or SDR hardware -- not available via WiFi proxy
+     */
+    data class RfEnvironment(
+        /** The specific anomaly that triggered this detection */
+        val anomalyType: String,
+        /** Confidence level of the anomaly detection */
+        val anomalyConfidence: String,
+        /** Human-readable anomaly description */
+        val anomalyDescription: String,
+        /** Contributing factors that led to the detection */
+        val contributingFactors: List<String>,
+        /** Total WiFi networks observed in the scan */
+        val totalNetworks: Int,
+        /** Number of hidden (no SSID) networks */
+        val hiddenNetworkCount: Int,
+        /** Average signal strength across all networks (dBm) */
+        val avgSignalStrength: Int,
+        /** Signal variance across all networks */
+        val signalVariance: Float,
+        /** Suspicious patterns identified in the RF environment */
+        val suspiciousPatterns: List<String>,
+        /** RF threat score (0-100) combining all anomaly indicators */
+        val rfThreatScore: Int,
+        /** Detailed hidden network analysis, if available */
+        val hiddenNetworkAnalysis: HiddenNetworkAnalysis?,
+        /** Current RF environment status, if available */
+        val environmentStatus: RfEnvironmentStatus?,
+        /** False positive likelihood estimate (0-100) */
+        val falsePositiveLikelihood: Float,
+        /** Indicators suggesting this is a false positive */
+        val fpIndicators: List<String>,
+        /** Whether this detection is based on WiFi proxy data rather than true RF measurement */
+        val isWifiProxyBased: Boolean = true
+    ) : EnrichedDetectorData()
+
+    data class Ble(val analysis: BleAnalysisData) : EnrichedDetectorData()
+
+    /**
+     * Enriched data for standard WiFi SSID/MAC pattern match detections.
+     *
+     * Standard WiFi detections (SSID pattern, MAC prefix) previously had no enriched
+     * data for LLM analysis, unlike WiFi Following which has [FollowingNetworkAnalysis].
+     * This data class provides the scan context so the LLM can give more informed analysis
+     * about the detected surveillance device's proximity, network characteristics, and
+     * environmental context.
+     */
+    data class WifiSsidMatch(
+        /** The matched SSID (may be empty for hidden networks) */
+        val ssid: String,
+        /** The BSSID (MAC address) of the access point */
+        val bssid: String,
+        /** WiFi channel number */
+        val channel: Int,
+        /** Operating frequency in MHz */
+        val frequencyMhz: Int,
+        /** Security/protocol capabilities string (e.g., "[WPA2-PSK-CCMP][ESS]") */
+        val capabilities: String,
+        /** Signal strength in dBm */
+        val rssiDbm: Int,
+        /** Whether the network has a hidden/empty SSID */
+        val isHidden: Boolean,
+        /** OUI vendor name resolved from BSSID prefix, if known */
+        val ouiVendor: String?,
+        /** Total number of APs visible in the same scan */
+        val nearbyApCount: Int,
+        /** The matched pattern description */
+        val matchedPatternDescription: String,
+        /** The detection method used (SSID_PATTERN or MAC_PREFIX) */
+        val detectionMethodName: String,
+        /** Manufacturer from the pattern database, if known */
+        val patternManufacturer: String?,
+        /** WiFi frequency band (2.4 GHz, 5 GHz, or 6 GHz) */
+        val frequencyBand: String
+    ) : EnrichedDetectorData()
+}
+
+/**
+ * BLE enriched analysis data for LLM prompts.
+ *
+ * Captures detailed BLE detection context including device identification,
+ * signal characteristics, tracker following analysis, and false positive indicators.
+ * This enables the LLM to provide more accurate and contextual analysis for
+ * BLE-based surveillance detections.
+ */
+data class BleAnalysisData(
+    // Device identification
+    val deviceName: String?,
+    val macAddress: String,
+    val manufacturer: String?,
+    val deviceCategory: BleDeviceCategory,
+
+    // Signal characteristics
+    val rssi: Int,
+    val advertisingRate: Float,
+    val isConnectable: Boolean,
+    val txPowerLevel: Int?,
+    val estimatedDistanceMeters: Double?,
+
+    // Service and manufacturer data
+    val serviceUuids: List<String>,
+    val manufacturerIds: List<Int>,
+
+    // Tracker following analysis (if applicable)
+    val isTrackerDevice: Boolean,
+    val trackerSightingCount: Int,
+    val distinctLocationCount: Int,
+    val isFollowingUser: Boolean,
+    val durationMinutes: Long,
+    val averageRssi: Int,
+    val rssiVariance: Double,
+    val isPossessionSignal: Boolean,
+    val suspicionScore: Int,
+    val suspicionReasons: List<String>,
+
+    // BLE spam analysis (if applicable)
+    val isBleSpam: Boolean,
+    val spamType: String?,
+    val spamEventsCount: Int,
+    val spamEventsPerSecond: Float,
+
+    // False positive assessment
+    val falsePositiveLikelihood: Float,
+    val fpIndicators: List<String>,
+    val isLikelyConsumerDevice: Boolean,
+    val isLikelyOwnDevice: Boolean,
+    val isPassingBy: Boolean
+)
+
+/**
+ * Categories for BLE device classification in enriched prompts.
+ */
+enum class BleDeviceCategory(val displayName: String) {
+    SURVEILLANCE("Surveillance Equipment"),
+    LAW_ENFORCEMENT("Law Enforcement Technology"),
+    FORENSICS("Forensics Tool"),
+    CONSUMER_TRACKER("Consumer Tracker"),
+    SMART_HOME("Smart Home Device"),
+    HACKING_TOOL("Hacking Tool"),
+    BLE_SPAM("BLE Spam Attack"),
+    BEACON("Retail/Advertising Beacon"),
+    UNKNOWN("Unknown BLE Device")
 }

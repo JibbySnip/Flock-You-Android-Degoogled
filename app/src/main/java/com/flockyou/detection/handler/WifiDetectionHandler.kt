@@ -13,6 +13,7 @@ import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.ThreatLevel
 import com.flockyou.data.model.rssiToSignalStrength
 import com.flockyou.data.model.scoreToThreatLevel
+import com.flockyou.ai.EnrichedDetectorData
 import com.flockyou.service.RogueWifiMonitor
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +47,46 @@ import javax.inject.Singleton
  * - [DetectionMethod.WIFI_ROGUE_AP] - Suspicious access points
  * - [DetectionMethod.WIFI_FOLLOWING] - Networks that appear at multiple user locations
  * - [DetectionMethod.WIFI_SURVEILLANCE_VAN] - Mobile surveillance hotspots
+ *
+ * ## Stock Android Feasibility Limitations
+ *
+ * Several WiFi attack detection methods have significant feasibility constraints
+ * on stock (non-rooted) Android due to the lack of monitor mode access:
+ *
+ * ### DEAUTH_ATTACK (Partially Feasible)
+ * Deauthentication attacks send 802.11 management frames to disconnect clients.
+ * Stock Android CANNOT observe raw 802.11 deauth frames (requires monitor mode).
+ * The current implementation in [RogueWifiMonitor] uses an indirect heuristic:
+ * it counts rapid WiFi disconnection events via ConnectivityManager callbacks.
+ * This is a reasonable proxy but has a HIGH FALSE POSITIVE RATE because normal
+ * network instability, moving between APs, or poor signal can also cause rapid
+ * disconnects. The 5-disconnects-in-60-seconds threshold helps but is not reliable.
+ * TRUE deauth detection requires: rooted device + monitor mode + raw frame capture.
+ *
+ * ### KARMA_ATTACK (Not Feasible on Stock Android)
+ * Karma attacks work by having a rogue AP respond to ALL probe requests, pretending
+ * to be whatever network the client is looking for. Detecting this requires observing
+ * probe response frames, which is ONLY possible in monitor mode. Stock Android cannot
+ * see 802.11 probe request/response frames. The KARMA_ATTACK enum value exists in
+ * [RogueWifiMonitor.WifiAnomalyType] but there is NO actual detection code that
+ * triggers it -- it is currently a placeholder. Any future implementation would need
+ * to rely on indirect heuristics (e.g., an AP suddenly appearing that matches a
+ * network in the device's saved network list), which would have very low confidence.
+ *
+ * ### EVIL_TWIN (Partially Feasible)
+ * Evil twin detection (same SSID from different BSSIDs with suspicious signal
+ * differences) IS partially feasible on stock Android because WifiManager.getScanResults()
+ * returns all visible APs including their BSSIDs and signal strengths. The current
+ * implementation in [RogueWifiMonitor.checkForEvilTwins] compares BSSIDs for the same
+ * SSID and looks for signal strength anomalies. However, this has significant limitations:
+ * - Cannot distinguish evil twins from legitimate multi-AP deployments (mesh networks,
+ *   enterprise WiFi, dual-band routers) without extensive heuristic filtering
+ * - Cannot detect evil twins that perfectly mimic the target AP's BSSID (MAC spoofing)
+ * - Cannot observe the actual association/authentication process for MITM indicators
+ * - The extensive false positive filtering (OUI checks, mesh detection, neighborhood
+ *   pattern checks) in RogueWifiMonitor reduces sensitivity
+ * Full evil twin detection requires: monitor mode + 802.11 frame analysis + certificate
+ * validation inspection.
  *
  * ## Supported Device Types
  * - Flock Safety cameras and variants
@@ -129,16 +170,16 @@ class WifiDetectionHandler @Inject constructor(
     )
 
     val supportedMethods: Set<DetectionMethod> = setOf(
-        DetectionMethod.SSID_PATTERN,
-        DetectionMethod.MAC_PREFIX,
-        DetectionMethod.WIFI_EVIL_TWIN,
-        DetectionMethod.WIFI_DEAUTH_ATTACK,
-        DetectionMethod.WIFI_HIDDEN_CAMERA,
-        DetectionMethod.WIFI_ROGUE_AP,
-        DetectionMethod.WIFI_SIGNAL_ANOMALY,
-        DetectionMethod.WIFI_FOLLOWING,
-        DetectionMethod.WIFI_SURVEILLANCE_VAN,
-        DetectionMethod.WIFI_KARMA_ATTACK
+        DetectionMethod.SSID_PATTERN,           // Fully feasible: WifiManager scan results
+        DetectionMethod.MAC_PREFIX,             // Fully feasible: BSSID available in scan results
+        DetectionMethod.WIFI_EVIL_TWIN,         // PARTIALLY FEASIBLE: heuristic via scan result comparison (see class KDoc)
+        DetectionMethod.WIFI_DEAUTH_ATTACK,     // PARTIALLY FEASIBLE: inferred from disconnect callbacks, NOT real deauth frame detection (see class KDoc)
+        DetectionMethod.WIFI_HIDDEN_CAMERA,     // Fully feasible: SSID/OUI pattern matching
+        DetectionMethod.WIFI_ROGUE_AP,          // Fully feasible: suspicious AP characteristics
+        DetectionMethod.WIFI_SIGNAL_ANOMALY,    // Fully feasible: RSSI comparison from scan results
+        DetectionMethod.WIFI_FOLLOWING,         // Fully feasible: BSSID tracking across locations
+        DetectionMethod.WIFI_SURVEILLANCE_VAN,  // Fully feasible: SSID/behavior heuristic
+        DetectionMethod.WIFI_KARMA_ATTACK       // NOT FEASIBLE on stock Android: requires monitor mode for probe response observation (see class KDoc). No detection code currently triggers this.
     )
 
     val displayName: String = "WiFi Detection Handler"
@@ -163,6 +204,16 @@ class WifiDetectionHandler @Inject constructor(
 
     /** Last detection time per BSSID for rate limiting */
     private val lastDetectionTime = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Enriched data from the most recent processData() call, keyed by detection ID.
+     * Callers should retrieve and consume this data after calling processData()
+     * to store it in [com.flockyou.ai.EnrichedDataCache] for LLM analysis.
+     *
+     * This map is cleared at the start of each processData() call.
+     */
+    private val _lastEnrichedResults = ConcurrentHashMap<String, EnrichedDetectorData.WifiSsidMatch>()
+    val lastEnrichedResults: Map<String, EnrichedDetectorData.WifiSsidMatch> get() = _lastEnrichedResults
 
     // Underlying monitor for advanced detection (evil twins, deauth, following networks)
     private var rogueWifiMonitor: RogueWifiMonitor? = null
@@ -277,16 +328,26 @@ class WifiDetectionHandler @Inject constructor(
      */
     suspend fun processData(data: List<ScanResult>): List<Detection> {
         val detections = mutableListOf<Detection>()
+        val totalApCount = data.size
+
+        // Clear enriched results from the previous scan cycle
+        _lastEnrichedResults.clear()
 
         // Process each scan result through pattern matching with error handling
         for (result in data) {
             try {
                 val context = scanResultToContext(result) ?: continue
 
-                // Process through pattern matching
-                val detection = handlePatternMatching(context)
+                // Process through pattern matching, passing scan environment size
+                val detection = handlePatternMatching(context, totalApCount)
                 if (detection != null) {
                     detections.add(detection.detection)
+
+                    // Store enriched data for LLM analysis (keyed by detection ID)
+                    detection.enrichedData?.let { enriched ->
+                        _lastEnrichedResults[detection.detection.id] = enriched
+                    }
+
                     try {
                         _detections.emit(detection.detection)
                     } catch (e: Exception) {
@@ -316,9 +377,10 @@ class WifiDetectionHandler @Inject constructor(
      * Process a single WiFi detection context.
      *
      * @param context The WiFi detection context
+     * @param nearbyApCount Total number of APs visible in the scan (for enriched data)
      * @return WifiDetectionResult if a detection was made, null otherwise
      */
-    fun handlePatternMatching(context: WifiDetectionContext): WifiDetectionResult? {
+    fun handlePatternMatching(context: WifiDetectionContext, nearbyApCount: Int = 0): WifiDetectionResult? {
         // Skip if below RSSI threshold
         if (context.rssi < config.rssiThreshold) {
             return null
@@ -333,7 +395,7 @@ class WifiDetectionHandler @Inject constructor(
 
         // Priority 1: Check for SSID pattern match
         if (config.enableSsidPatternMatching && context.ssid.isNotEmpty()) {
-            checkSsidPattern(context)?.let { result ->
+            checkSsidPattern(context, nearbyApCount)?.let { result ->
                 lastDetectionTime[context.bssid] = now
                 return result
             }
@@ -341,7 +403,7 @@ class WifiDetectionHandler @Inject constructor(
 
         // Priority 2: Check for MAC prefix match
         if (config.enableMacPrefixMatching) {
-            checkMacPrefix(context)?.let { result ->
+            checkMacPrefix(context, nearbyApCount)?.let { result ->
                 lastDetectionTime[context.bssid] = now
                 return result
             }
@@ -381,7 +443,7 @@ class WifiDetectionHandler @Inject constructor(
     /**
      * Check SSID against known surveillance patterns.
      */
-    private fun checkSsidPattern(context: WifiDetectionContext): WifiDetectionResult? {
+    private fun checkSsidPattern(context: WifiDetectionContext, nearbyApCount: Int = 0): WifiDetectionResult? {
         val pattern = DetectionPatterns.matchSsidPattern(context.ssid) ?: return null
 
         // Skip surveillance patterns if disabled
@@ -410,17 +472,26 @@ class WifiDetectionHandler @Inject constructor(
             matchedPatterns = buildMatchedPatternsJson(listOf(pattern.description))
         )
 
+        val enrichedData = buildWifiSsidEnrichedData(
+            context = context,
+            nearbyApCount = nearbyApCount,
+            matchedPatternDescription = pattern.description,
+            detectionMethodName = DetectionMethod.SSID_PATTERN.displayName,
+            patternManufacturer = pattern.manufacturer
+        )
+
         return WifiDetectionResult(
             detection = detection,
             aiPrompt = buildSsidPatternPrompt(context, pattern),
-            confidence = calculateConfidence(context, 0.85f)
+            confidence = calculateConfidence(context, 0.85f),
+            enrichedData = enrichedData
         )
     }
 
     /**
      * Check MAC address prefix (OUI) against known manufacturers.
      */
-    private fun checkMacPrefix(context: WifiDetectionContext): WifiDetectionResult? {
+    private fun checkMacPrefix(context: WifiDetectionContext, nearbyApCount: Int = 0): WifiDetectionResult? {
         val macPrefix = DetectionPatterns.matchMacPrefix(context.bssid) ?: return null
 
         // Skip surveillance patterns if disabled
@@ -451,10 +522,19 @@ class WifiDetectionHandler @Inject constructor(
             ))
         )
 
+        val enrichedData = buildWifiSsidEnrichedData(
+            context = context,
+            nearbyApCount = nearbyApCount,
+            matchedPatternDescription = macPrefix.description.ifEmpty { "MAC prefix: ${macPrefix.prefix}" },
+            detectionMethodName = DetectionMethod.MAC_PREFIX.displayName,
+            patternManufacturer = macPrefix.manufacturer
+        )
+
         return WifiDetectionResult(
             detection = detection,
             aiPrompt = buildMacPrefixPrompt(context, macPrefix),
-            confidence = calculateConfidence(context, 0.70f)
+            confidence = calculateConfidence(context, 0.70f),
+            enrichedData = enrichedData
         )
     }
 
@@ -519,6 +599,56 @@ class WifiDetectionHandler @Inject constructor(
         }
 
         return confidence.coerceIn(0f, 1f)
+    }
+
+    /**
+     * Build enriched data for WiFi SSID/MAC pattern match detections.
+     *
+     * This provides network scan context to the LLM for more informed analysis
+     * of the detected surveillance device's proximity, legitimacy, and environment.
+     */
+    private fun buildWifiSsidEnrichedData(
+        context: WifiDetectionContext,
+        nearbyApCount: Int,
+        matchedPatternDescription: String,
+        detectionMethodName: String,
+        patternManufacturer: String?
+    ): EnrichedDetectorData.WifiSsidMatch {
+        // Attempt to resolve OUI vendor from BSSID prefix
+        val ouiVendor = try {
+            val macPrefix = DetectionPatterns.matchMacPrefix(context.bssid)
+            macPrefix?.manufacturer
+        } catch (e: Exception) {
+            null
+        }
+
+        return EnrichedDetectorData.WifiSsidMatch(
+            ssid = context.ssid,
+            bssid = context.bssid,
+            channel = context.channel,
+            frequencyMhz = context.frequency,
+            capabilities = context.capabilities,
+            rssiDbm = context.rssi,
+            isHidden = context.isHidden,
+            ouiVendor = ouiVendor,
+            nearbyApCount = nearbyApCount,
+            matchedPatternDescription = matchedPatternDescription,
+            detectionMethodName = detectionMethodName,
+            patternManufacturer = patternManufacturer,
+            frequencyBand = frequencyToBand(context.frequency)
+        )
+    }
+
+    /**
+     * Convert frequency to WiFi band name.
+     */
+    private fun frequencyToBand(frequencyMhz: Int): String {
+        return when {
+            frequencyMhz in 2400..2500 -> "2.4 GHz"
+            frequencyMhz in 5150..5850 -> "5 GHz"
+            frequencyMhz in 5925..7125 -> "6 GHz"
+            else -> "Unknown"
+        }
     }
 
     /**
@@ -1236,9 +1366,11 @@ data class WifiDetectionContext(
  * @property detection The generated Detection object
  * @property aiPrompt Contextual prompt for AI analysis
  * @property confidence Detection confidence (0.0-1.0)
+ * @property enrichedData Optional enriched data for LLM analysis of SSID/MAC match detections
  */
 data class WifiDetectionResult(
     val detection: Detection,
     val aiPrompt: String,
-    val confidence: Float
+    val confidence: Float,
+    val enrichedData: EnrichedDetectorData.WifiSsidMatch? = null
 )

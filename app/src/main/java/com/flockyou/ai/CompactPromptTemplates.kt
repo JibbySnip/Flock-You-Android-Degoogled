@@ -206,6 +206,10 @@ impossible_speed=${analysis.impossibleSpeed}
 cell_trust=${analysis.cellTrustScore}%
 sig_spike=${analysis.signalSpikeDetected}
 down+spike=${analysis.downgradeWithSignalSpike}
+down+new_tower=${analysis.downgradeWithNewTower}
+lac_tac_changed=${analysis.lacTacChanged}
+operator_changed=${analysis.operatorChanged}
+roaming=${analysis.isRoaming}
 fp_pct=${String.format("%.0f", analysis.falsePositiveLikelihood)}%
 normal_handoff=${analysis.isLikelyNormalHandoff}
 5g_beam=${analysis.isLikely5gBeamSteering}
@@ -388,6 +392,49 @@ ${detection.signalStrength.displayName}"""
         return wrapGemmaPrompt(content)
     }
 
+    // ==================== COMPACT BLE PROMPT ====================
+
+    /**
+     * Compact BLE analysis prompt - ~350 tokens
+     */
+    fun compactBlePrompt(
+        detection: Detection,
+        analysis: BleAnalysisData
+    ): String {
+        val trackerInfo = if (analysis.isTrackerDevice) {
+            "follow=${analysis.isFollowingUser},locs=${analysis.distinctLocationCount},dur=${analysis.durationMinutes}min,susp=${analysis.suspicionScore}/100,possess=${analysis.isPossessionSignal}"
+        } else ""
+
+        val spamInfo = if (analysis.isBleSpam) {
+            "spam=${analysis.spamType},events=${analysis.spamEventsCount},rate=${String.format("%.1f", analysis.spamEventsPerSecond)}/s"
+        } else ""
+
+        val content = """$ABBREVIATION_LEGEND
+
+BLE dev analysis. Respond JSON:
+{"is_threat":true/false,"dev_type":"${analysis.deviceCategory.displayName}","conf":0-100,"fp_pct":0-100,"explain":"1-2 sentences","action":"what to do"}
+
+BLE_DATA:
+name=${sanitize(analysis.deviceName) ?: "unknown"}
+mac=${sanitize(analysis.macAddress)}
+cat=${analysis.deviceCategory.displayName}
+sig=${analysis.rssi}dBm
+adv_rate=${String.format("%.1f", analysis.advertisingRate)}pps
+connect=${analysis.isConnectable}
+${analysis.estimatedDistanceMeters?.let { "dist=${String.format("%.1f", it)}m" } ?: ""}
+${if (trackerInfo.isNotEmpty()) "TRACKER:$trackerInfo" else ""}
+${if (spamInfo.isNotEmpty()) "SPAM:$spamInfo" else ""}
+fp_pct=${String.format("%.0f", analysis.falsePositiveLikelihood)}%
+consumer=${analysis.isLikelyConsumerDevice}
+passing=${analysis.isPassingBy}
+
+RULES:fp_pct>50=likely benign BLE dev
+
+JSON:"""
+
+        return wrapGemmaPrompt(content)
+    }
+
     // ==================== HELPER FUNCTIONS ====================
 
     /**
@@ -414,6 +461,19 @@ ${detection.signalStrength.displayName}"""
             is EnrichedDetectorData.Satellite -> {
                 "SAT:type=${data.detectorType},${data.riskIndicators.take(2).joinToString(",")}"
             }
+            is EnrichedDetectorData.Ble -> {
+                val a = data.analysis
+                "BLE:cat=${a.deviceCategory.displayName},sig=${a.rssi}dBm,adv=${String.format("%.1f", a.advertisingRate)}pps" +
+                    (if (a.isTrackerDevice) ",follow=${a.isFollowingUser},susp=${a.suspicionScore}" else "") +
+                    (if (a.isBleSpam) ",spam=${a.spamType}" else "") +
+                    ",fp=${String.format("%.0f", a.falsePositiveLikelihood)}%"
+            }
+            is EnrichedDetectorData.WifiSsidMatch -> {
+                "WIFI_SSID:ssid=${data.ssid.ifEmpty { "(hidden)" }},ch=${data.channel},sig=${data.rssiDbm}dBm,band=${data.frequencyBand},oui=${data.ouiVendor ?: "unk"},aps=${data.nearbyApCount},method=${data.detectionMethodName}"
+            }
+            is EnrichedDetectorData.RfEnvironment -> {
+                "RF:type=${data.anomalyType},score=${data.rfThreatScore},nets=${data.totalNetworks},hidden=${data.hiddenNetworkCount},fp=${String.format("%.0f", data.falsePositiveLikelihood)}%"
+            }
         }
     }
 
@@ -429,6 +489,8 @@ ${detection.signalStrength.displayName}"""
             is EnrichedDetectorData.Gnss -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
             is EnrichedDetectorData.Ultrasonic -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
             is EnrichedDetectorData.WifiFollowing -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
+            is EnrichedDetectorData.Ble -> return enrichedData.analysis.falsePositiveLikelihood.toInt()
+            is EnrichedDetectorData.RfEnvironment -> return enrichedData.falsePositiveLikelihood.toInt()
             else -> {}
         }
 

@@ -42,6 +42,80 @@ import kotlin.math.abs
  * - Multipath interference
  *
  * ===================================================================================
+ * ANDROID GNSS API FEASIBILITY AND CHIPSET CONSIDERATIONS
+ * ===================================================================================
+ *
+ * GnssStatus API (Android 7.0 / API 24+):
+ * -----------------------------------------
+ * - Available on ALL devices with GPS, provides: satellite count, C/N0, elevation,
+ *   azimuth, constellation type, ephemeris/almanac flags, usedInFix.
+ * - Carrier frequency (hasCarrierFrequencyHz): Android 8.0+ (API 26), but
+ *   chipset-dependent. Qualcomm Snapdragon 845+ and Samsung Exynos 990+ support
+ *   dual-frequency (L1+L5); older/budget chipsets report L1 only or null.
+ * - Baseband C/N0 (hasBasebandCn0DbHz): Android 11+ (API 30), chipset-dependent.
+ *   Provides pre-AGC signal strength useful for jamming detection. Not available
+ *   on most MediaTek chipsets as of 2025.
+ *
+ * GnssMeasurementsEvent API (Android 7.0 / API 24+):
+ * ---------------------------------------------------
+ * - Provides raw pseudorange, carrier phase, Doppler, and clock data.
+ * - CRITICAL: Availability is chipset-dependent, NOT just API-level dependent.
+ *   - Qualcomm Snapdragon 835+: Full raw measurements supported.
+ *   - Samsung Exynos 9810+: Supported, but carrier phase may have quality issues.
+ *   - MediaTek Dimensity 700+: Partial support; older MediaTek chips (Helio series)
+ *     often return STATUS_NOT_SUPPORTED.
+ *   - Google Tensor (Pixel 6+): Full support via Samsung/Exynos modem.
+ * - Clock bias/drift accuracy varies significantly between chipsets. Qualcomm
+ *   provides the most reliable clock data for drift analysis.
+ * - Hardware clock discontinuity count (hardwareClockDiscontinuityCount):
+ *   Android 9.0+ (API 28). Essential for distinguishing real clock anomalies
+ *   from normal receiver resets.
+ *
+ * AGC (Automatic Gain Control) for Jamming Detection:
+ * ----------------------------------------------------
+ * - AGC level is the primary hardware indicator for RF jamming detection.
+ * - NOT available via standard Android GNSS APIs as of Android 14 (API 34).
+ * - Some chipsets expose AGC via vendor-specific HAL extensions or
+ *   GnssMeasurement.getAutomaticGainControlLevelDb() (added experimentally).
+ * - Qualcomm: May expose via QMI/DIAG interface (requires system/root access).
+ * - Without AGC, jamming detection relies on indirect indicators: satellite
+ *   count drop, C/N0 degradation, and loss of fix.
+ * - Our jamming detection uses these indirect methods which work across all
+ *   chipsets but have higher false positive rates than AGC-based detection.
+ *
+ * HDOP/PDOP (Dilution of Precision):
+ * ------------------------------------
+ * - Android does not expose DOP values directly via GnssStatus.
+ * - Location.getAccuracy() provides horizontal accuracy in meters, which is
+ *   derived from HDOP internally but does not expose the raw DOP value.
+ * - Some vendor implementations populate DOP via Location extras bundle
+ *   (non-standard, unreliable across devices).
+ * - Our geometry analysis uses elevation/azimuth distribution as a proxy for
+ *   DOP, which is available on all chipsets.
+ *
+ * GrapheneOS Location Privacy Impact:
+ * ------------------------------------
+ * - GrapheneOS can redirect location requests through its privacy proxy,
+ *   which may affect raw GNSS measurement availability.
+ * - "Sensors Off" quick tile disables all GNSS hardware access entirely.
+ * - Location permissions in GrapheneOS may restrict GnssMeasurementsEvent
+ *   callbacks even when ACCESS_FINE_LOCATION is granted, depending on the
+ *   per-app sensor permission toggles.
+ * - Mock location detection: GrapheneOS allows per-app mock location
+ *   providers without developer options, which can affect position data
+ *   without affecting raw GNSS measurements (detectable discrepancy).
+ *
+ * Chipset Detection Strategy:
+ * ----------------------------
+ * - We register for GnssMeasurementsEvent and handle STATUS_NOT_SUPPORTED
+ *   gracefully, falling back to GnssStatus-only analysis.
+ * - Clock drift analysis requires GnssMeasurementsEvent; if unavailable,
+ *   the CLOCK_ANOMALY detection pattern is effectively disabled.
+ * - Multipath indicator (GnssMeasurement.getMultipathIndicator()) is
+ *   chipset-dependent; many budget chipsets always return UNKNOWN.
+ * ===================================================================================
+ *
+ * ===================================================================================
  * REAL-WORLD GNSS SPOOFING/JAMMING KNOWLEDGE BASE
  * ===================================================================================
  *
@@ -191,7 +265,7 @@ class GnssSatelliteMonitor(
         // Timing thresholds
         const val MAX_CLOCK_DRIFT_NS = 1_000_000L  // 1ms max drift between measurements
         const val HISTORY_SIZE = 100
-        const val DEFAULT_ANOMALY_COOLDOWN_MS = 30_000L  // 30 seconds between same anomaly type
+        const val DEFAULT_ANOMALY_COOLDOWN_MS = 300_000L  // 5 minutes between same anomaly type
 
         // ==================== REAL-WORLD SPOOFING DETECTION THRESHOLDS ====================
 
@@ -220,7 +294,7 @@ class GnssSatelliteMonitor(
 
         // Indoor/environment detection for false positive suppression
         const val INDOOR_SIGNAL_THRESHOLD = 25.0  // dB-Hz - below this likely indoors
-        const val INDOOR_SUPPRESSION_DURATION_MS = 120_000L  // 2 minutes suppression after indoor detection
+        const val INDOOR_SUPPRESSION_DURATION_MS = 300_000L  // 5 minutes suppression after indoor detection (was 2 minutes)
         const val URBAN_MULTIPATH_CN0_VARIANCE_THRESHOLD = 8.0  // High variance = multipath environment
     }
 
@@ -299,6 +373,84 @@ class GnssSatelliteMonitor(
     // Attack pattern tracking
     private var suspectedAttackType: SuspectedAttackType? = null
     private var attackPatternConfidence: Float = 0f
+
+    // ==================== CONFIRMATION PERIOD SYSTEM ====================
+    // Require multiple detections within a time window before alerting
+    // This prevents single-detection false positives from transient conditions
+
+    /**
+     * Tracks confirmation state for an anomaly type
+     */
+    data class ConfirmationState(
+        val firstDetectionTime: Long,
+        val detectionCount: Int,
+        val requiredCount: Int,
+        val windowMs: Long
+    )
+
+    // Pending confirmations by anomaly type
+    private val pendingConfirmations = mutableMapOf<GnssAnomalyType, ConfirmationState>()
+
+    /**
+     * Confirmation requirements by anomaly type.
+     * Pair<requiredCount, windowMs> - e.g., 3 detections within 60 seconds
+     */
+    // Confirmation requirements - placed outside companion object to avoid duplicate companion
+    private val ANOMALY_CONFIRMATION_REQUIREMENTS = mapOf(
+            GnssAnomalyType.SPOOFING_DETECTED to Pair(6, 120_000L),      // 6 in 2 min
+            GnssAnomalyType.JAMMING_DETECTED to Pair(6, 120_000L),        // 6 in 2 min
+            GnssAnomalyType.SIGNAL_UNIFORMITY to Pair(8, 300_000L),      // 8 in 5 min
+            GnssAnomalyType.CLOCK_ANOMALY to Pair(10, 300_000L),         // 10 in 5 min
+            GnssAnomalyType.MULTIPATH_SEVERE to Pair(10, 600_000L),      // 10 in 10 min
+            GnssAnomalyType.IMPOSSIBLE_GEOMETRY to Pair(6, 120_000L),    // 6 in 2 min
+            GnssAnomalyType.SUDDEN_SIGNAL_LOSS to Pair(4, 60_000L),     // 4 in 60s
+            GnssAnomalyType.CONSTELLATION_DROPOUT to Pair(8, 300_000L),  // 8 in 5 min
+            GnssAnomalyType.CN0_SPIKE to Pair(6, 120_000L),              // 6 in 2 min
+            GnssAnomalyType.ELEVATION_ANOMALY to Pair(8, 300_000L)       // 8 in 5 min
+        )
+
+    /**
+     * Check if an anomaly should be reported based on confirmation requirements.
+     * Critical confidence always bypasses confirmation.
+     * Returns true if the anomaly is confirmed and should be reported.
+     */
+    private fun shouldReportAnomaly(type: GnssAnomalyType, confidence: AnomalyConfidence): Boolean {
+        // Critical confidence bypasses confirmation - immediate alert
+        if (confidence == AnomalyConfidence.CRITICAL) {
+            pendingConfirmations.remove(type)
+            return true
+        }
+
+        val now = System.currentTimeMillis()
+        val (requiredCount, windowMs) = ANOMALY_CONFIRMATION_REQUIREMENTS[type] ?: Pair(2, 30_000L)
+        val currentState = pendingConfirmations[type]
+
+        if (currentState == null || (now - currentState.firstDetectionTime) > windowMs) {
+            // Start new confirmation window
+            pendingConfirmations[type] = ConfirmationState(
+                firstDetectionTime = now,
+                detectionCount = 1,
+                requiredCount = requiredCount,
+                windowMs = windowMs
+            )
+            Log.d(TAG, "Started confirmation window for $type: 1/$requiredCount")
+            return false  // Don't report yet - first detection
+        }
+
+        // Increment count within existing window
+        val newCount = currentState.detectionCount + 1
+        pendingConfirmations[type] = currentState.copy(detectionCount = newCount)
+        Log.d(TAG, "Confirmation for $type: $newCount/$requiredCount")
+
+        if (newCount >= requiredCount) {
+            // Confirmed! Clear state and allow report
+            pendingConfirmations.remove(type)
+            Log.i(TAG, "Anomaly $type CONFIRMED after $newCount detections")
+            return true
+        }
+
+        return false  // Not yet confirmed
+    }
 
     /**
      * Real-world attack types based on documented incidents
@@ -474,7 +626,11 @@ class GnssSatelliteMonitor(
     }
 
     /**
-     * Comprehensive GNSS anomaly analysis with enriched data
+     * Comprehensive GNSS anomaly analysis with enriched data.
+     *
+     * This is the primary data structure passed to the LLM for GNSS anomaly analysis.
+     * All fields should be populated by [buildGnssAnalysis] to give the LLM maximum
+     * context for accurate assessment.
      */
     data class GnssAnomalyAnalysis(
         // Constellation Fingerprinting
@@ -528,7 +684,23 @@ class GnssSatelliteMonitor(
         val fpIndicators: List<String> = emptyList(),
         val isLikelyNormalOperation: Boolean = false,
         val isLikelyUrbanMultipath: Boolean = false,
-        val isLikelyIndoorSignalLoss: Boolean = false
+        val isLikelyIndoorSignalLoss: Boolean = false,
+
+        // Satellite Count & Fix Quality (for LLM context)
+        val totalSatellitesVisible: Int = 0,
+        val satellitesUsedInFix: Int = 0,
+        val hasFix: Boolean = false,
+
+        // DOP Values (Dilution of Precision) - null when unavailable from chipset
+        // HDOP/PDOP are not directly exposed via GnssStatus API; they require
+        // the Location object's accuracy or vendor-specific extensions.
+        val hdop: Float? = null,
+        val pdop: Float? = null,
+
+        // Environment Context (for false positive suppression and LLM prompts)
+        val environmentType: String = "Unknown",       // "Indoor", "Urban Canyon", "Open Sky", etc.
+        val environmentConfidence: Float = 0f,         // 0-1
+        val environmentGuidance: String = ""           // User-facing guidance about environment
     )
 
     // ==================== Lifecycle ====================
@@ -595,10 +767,22 @@ class GnssSatelliteMonitor(
 
     /**
      * Update scan timing configuration.
-     * @param intervalSeconds Cooldown time between same anomaly type reports (1-30 seconds)
+     *
+     * NOTE: This controls the per-type cooldown between confirmed anomaly reports.
+     * Setting this too low will cause alert flooding. The default is 5 minutes
+     * ([DEFAULT_ANOMALY_COOLDOWN_MS] = 300,000 ms) which is the recommended value.
+     * The minimum is clamped to 60 seconds to prevent excessive alerting.
+     *
+     * This cooldown is applied AFTER the confirmation period (Stage 1).
+     * The confirmation period requirements are fixed per anomaly type and are
+     * not affected by this setting.
+     *
+     * @param intervalSeconds Cooldown time between same anomaly type reports (60-300 seconds)
      */
     fun updateScanTiming(intervalSeconds: Int) {
-        anomalyCooldownMs = (intervalSeconds.coerceIn(1, 30) * 1000L)
+        // Enforce minimum 60-second cooldown to prevent alert flooding.
+        // Maximum 300 seconds (5 minutes) which is the default.
+        anomalyCooldownMs = (intervalSeconds.coerceIn(60, 300) * 1000L)
         Log.d(TAG, "Updated anomaly cooldown: ${anomalyCooldownMs}ms")
     }
 
@@ -793,22 +977,24 @@ class GnssSatelliteMonitor(
         val currentBias = clock.biasNanos.toLong()
         trackClockDriftAccumulation(currentBias)
 
-        // Check for immediate large clock anomalies
+        // Clock anomalies from measurements - only report if extremely severe
+        // Single clock jumps are common during receiver mode changes, cold starts, etc.
         if (clockDriftHistory.isNotEmpty()) {
             val lastDrift = clockDriftHistory.last()
-            if (abs(lastDrift) > MAX_CLOCK_DRIFT_NS) {
-                val driftTrend = analyzeDriftTrend()
+            val jumpCount = countDriftJumps()
+            val driftTrend = if (abs(lastDrift) > MAX_CLOCK_DRIFT_NS) analyzeDriftTrend() else DriftTrend.STABLE
+            if (abs(lastDrift) > MAX_CLOCK_DRIFT_NS * 10 && jumpCount > 10 && driftTrend == DriftTrend.ERRATIC) {
                 reportAnomaly(
                     type = GnssAnomalyType.CLOCK_ANOMALY,
-                    description = "Large clock discontinuity detected - trend: ${driftTrend.displayName}",
-                    technicalDetails = "Clock drift: ${abs(lastDrift)}ns (threshold: ${MAX_CLOCK_DRIFT_NS}ns)\n" +
+                    description = "Severe clock discontinuity detected - trend: ${driftTrend.displayName}",
+                    technicalDetails = "Clock drift: ${abs(lastDrift)}ns (threshold: ${MAX_CLOCK_DRIFT_NS * 10}ns)\n" +
                         "Cumulative drift: ${cumulativeClockDriftNs / 1_000_000}ms\n" +
-                        "Jump count: ${countDriftJumps()}",
-                    confidence = if (driftTrend == DriftTrend.ERRATIC) AnomalyConfidence.HIGH else AnomalyConfidence.MEDIUM,
+                        "Jump count: $jumpCount",
+                    confidence = AnomalyConfidence.HIGH,
                     contributingFactors = listOf(
                         "Clock bias jumped ${abs(lastDrift) / 1_000_000}ms",
                         "Drift trend: ${driftTrend.displayName}",
-                        "Total jumps: ${countDriftJumps()}"
+                        "Total jumps: $jumpCount"
                     )
                 )
             }
@@ -1097,9 +1283,8 @@ class GnssSatelliteMonitor(
         // but real spoofing has uniform NORMAL/HIGH signals
         val canReportSpoofing = !analysis.isLikelyIndoorSignalLoss
 
-        if (canReportSpoofing && (status.spoofingRiskLevel == SpoofingRiskLevel.HIGH ||
-            status.spoofingRiskLevel == SpoofingRiskLevel.CRITICAL ||
-            analysis.spoofingLikelihood >= 50)) {
+        if (canReportSpoofing && (status.spoofingRiskLevel == SpoofingRiskLevel.CRITICAL ||
+            analysis.spoofingLikelihood >= 80)) {
 
             val enrichedFactors = buildGnssContributingFactors(analysis)
 
@@ -1130,7 +1315,7 @@ class GnssSatelliteMonitor(
             status.satellitesUsedInFix < GOOD_FIX_SATELLITES &&
             !(status.hasFix && status.averageCn0DbHz > 30.0)
 
-        if (canReportJamming && (status.jammingDetected || analysis.jammingLikelihood >= 50)) {
+        if (canReportJamming && (status.jammingDetected && analysis.jammingLikelihood >= 80)) {
             val enrichedFactors = buildGnssContributingFactors(analysis)
 
             val confidence = when {
@@ -1256,13 +1441,13 @@ class GnssSatelliteMonitor(
             )
         }
 
-        // Clock drift anomaly - enriched
-        if (analysis.driftAnomalous) {
+        // Clock drift anomaly - only report if extremely severe (many jumps + erratic)
+        if (analysis.driftAnomalous && analysis.driftJumpCount > 10 && analysis.driftTrend == DriftTrend.ERRATIC) {
             reportAnomaly(
                 type = GnssAnomalyType.CLOCK_ANOMALY,
                 description = "Clock drift anomaly - ${analysis.driftTrend.displayName}, ${analysis.driftJumpCount} jumps",
                 technicalDetails = buildGnssTechnicalDetails(analysis),
-                confidence = if (analysis.driftJumpCount > 5) AnomalyConfidence.HIGH else AnomalyConfidence.MEDIUM,
+                confidence = AnomalyConfidence.HIGH,
                 contributingFactors = listOf(
                     "Drift trend: ${analysis.driftTrend.displayName}",
                     "Jump count: ${analysis.driftJumpCount}",
@@ -1271,8 +1456,8 @@ class GnssSatelliteMonitor(
             )
         }
 
-        // Elevation anomaly (low elevation + high signal = spoofing)
-        if (analysis.lowElevHighSignalCount > 2) {
+        // Elevation anomaly (low elevation + high signal = spoofing) - only report with many anomalous sats
+        if (analysis.lowElevHighSignalCount > 5 && analysis.spoofingLikelihood >= 50) {
             // Log which satellites triggered this for debugging
             val triggeringSats = satellites.filter {
                 it.elevationDegrees < SPOOFING_ELEVATION_THRESHOLD && it.cn0DbHz > 40
@@ -1296,23 +1481,37 @@ class GnssSatelliteMonitor(
             )
         }
 
-        // Constellation dropout - enriched
-        val currentConstellations = status.constellationCounts.keys
-        if (currentConstellations.size == 1 && satellites.size >= 6) {
-            reportAnomaly(
-                type = GnssAnomalyType.CONSTELLATION_DROPOUT,
-                description = "Only ${currentConstellations.first().displayName} visible (missing: ${analysis.missingConstellations.joinToString { it.code }})",
-                technicalDetails = buildGnssTechnicalDetails(analysis),
-                confidence = AnomalyConfidence.LOW,
-                contributingFactors = listOf(
-                    "Constellation match score: ${analysis.constellationMatchScore}%",
-                    "Expected: ${analysis.expectedConstellations.joinToString { it.code }}",
-                    "Single constellation unusual in open sky"
-                )
-            )
-        }
+        // Constellation dropout - suppressed: single constellation visible is almost always
+        // normal receiver/environment behavior, not an attack indicator
     }
 
+    /**
+     * Report a GNSS anomaly after two-stage gating:
+     *
+     * STAGE 1 - Confirmation Period:
+     * Each anomaly type has its own confirmation requirement (see [ANOMALY_CONFIRMATION_REQUIREMENTS]).
+     * Multiple detections within a time window are required before an anomaly is reported.
+     * This prevents transient conditions (cold start, brief obstruction) from generating alerts.
+     * Confirmation requirements by type:
+     *   - SPOOFING_DETECTED:     6 detections in 2 minutes
+     *   - JAMMING_DETECTED:      6 detections in 2 minutes
+     *   - SIGNAL_UNIFORMITY:     8 detections in 5 minutes
+     *   - CLOCK_ANOMALY:        10 detections in 5 minutes
+     *   - MULTIPATH_SEVERE:     10 detections in 10 minutes
+     *   - IMPOSSIBLE_GEOMETRY:   6 detections in 2 minutes
+     *   - SUDDEN_SIGNAL_LOSS:    4 detections in 60 seconds
+     *   - CONSTELLATION_DROPOUT: 8 detections in 5 minutes
+     *   - CN0_SPIKE:             6 detections in 2 minutes
+     *   - ELEVATION_ANOMALY:     8 detections in 5 minutes
+     * Exception: CRITICAL confidence bypasses confirmation entirely.
+     *
+     * STAGE 2 - Rate Limiting (Cooldown):
+     * After confirmation, a per-type cooldown prevents duplicate alerts.
+     * Default cooldown: [DEFAULT_ANOMALY_COOLDOWN_MS] = 5 minutes (300,000 ms).
+     * This cooldown applies uniformly across ALL anomaly types.
+     * The cooldown can be adjusted via [updateScanTiming] but should not be set
+     * below 60 seconds to avoid alert flooding.
+     */
     private fun reportAnomaly(
         type: GnssAnomalyType,
         description: String,
@@ -1322,7 +1521,14 @@ class GnssSatelliteMonitor(
         affectedConstellations: List<ConstellationType> = emptyList(),
         analysis: GnssAnomalyAnalysis? = null
     ) {
-        // Rate limiting
+        // STAGE 1: Confirmation check - require multiple sustained detections before alerting
+        // This prevents false positives from transient conditions
+        if (!shouldReportAnomaly(type, confidence)) {
+            return  // Not yet confirmed - waiting for more detections
+        }
+
+        // STAGE 2: Rate limiting cooldown (after confirmation)
+        // Prevents the same anomaly type from generating alerts more than once per cooldown period
         val now = System.currentTimeMillis()
         val lastTime = lastAnomalyTimes[type] ?: 0L
         if (now - lastTime < anomalyCooldownMs) return
@@ -1362,7 +1568,7 @@ class GnssSatelliteMonitor(
             threatLevel = severity
         )
 
-        Log.w(TAG, "GNSS Anomaly: ${type.displayName} - $description")
+        Log.w(TAG, "GNSS Anomaly CONFIRMED: ${type.displayName} - $description")
     }
 
     // ==================== Utility ====================
@@ -2424,6 +2630,49 @@ class GnssSatelliteMonitor(
             lowElevHighSignal == 0) ||
             (isLikelyIndoorAttenuation && status.satellitesUsedInFix >= GOOD_FIX_SATELLITES)
 
+        // Assess environment context for false positive analysis and LLM prompts
+        val environmentAssessment = assessEnvironmentContext(satellites, status)
+
+        // Determine if urban multipath is the likely cause
+        val isLikelyUrbanMultipath = environmentAssessment.likelyUrbanCanyon &&
+            !cn0TooUniform && // Urban multipath causes HIGH variance, not low
+            lowElevHighSignal <= 2 // Urban canyons may block low-elev sats but not spoof them
+
+        // Build false positive indicators list
+        val fpIndicators = mutableListOf<String>()
+        if (isLikelyIndoorAttenuation) {
+            fpIndicators.add("Indoor signal attenuation detected (avg C/N0 ${String.format("%.1f", currentMean)} dB-Hz)")
+        }
+        if (isLikelyUrbanMultipath) {
+            fpIndicators.add("Urban multipath environment (high signal variance ${String.format("%.1f", cn0Variance)} dB-Hz)")
+        }
+        if (environmentAssessment.likelyNaturalObstruction) {
+            fpIndicators.add("Partial sky view detected (natural obstruction)")
+        }
+        if (isLikelyNormalOperation) {
+            fpIndicators.add("Strong multi-constellation fix maintained (${status.satellitesUsedInFix} satellites)")
+        }
+        if (status.satellitesUsedInFix >= STRONG_FIX_SATELLITES && crossConstellation.constellationCount >= 4) {
+            fpIndicators.add("Excellent fix: ${status.satellitesUsedInFix} sats across ${crossConstellation.constellationCount} constellations")
+        }
+        if (status.hasFix && status.averageCn0DbHz > 35.0 && spoofingLikelihood < 50) {
+            fpIndicators.add("Healthy signal environment (avg ${String.format("%.1f", status.averageCn0DbHz)} dB-Hz)")
+        }
+
+        // Calculate false positive likelihood as a composite score
+        var fpLikelihood = 0f
+        if (isLikelyIndoorAttenuation) fpLikelihood += 40f
+        if (isLikelyUrbanMultipath) fpLikelihood += 30f
+        if (environmentAssessment.likelyNaturalObstruction) fpLikelihood += 20f
+        if (isLikelyNormalOperation) fpLikelihood += 30f
+        if (status.satellitesUsedInFix >= STRONG_FIX_SATELLITES) fpLikelihood += 20f
+        // Reduce FP likelihood if strong spoofing/jamming indicators are present
+        if (spoofingLikelihood >= 70) fpLikelihood *= 0.3f
+        if (jammingLikelihood >= 70) fpLikelihood *= 0.3f
+        if (cn0TooUniform && !isLikelyIndoorAttenuation) fpLikelihood *= 0.5f
+        if (lowElevHighSignal > 3) fpLikelihood *= 0.4f
+        fpLikelihood = fpLikelihood.coerceIn(0f, 95f)
+
         return GnssAnomalyAnalysis(
             expectedConstellations = expected,
             observedConstellations = observed,
@@ -2458,9 +2707,23 @@ class GnssSatelliteMonitor(
             crossConstellationConsistent = crossConstellation.constellationsConsistent,
             allConstellationsIdenticalSignals = crossConstellation.allConstellationsIdenticalSignals,
             crossConstellationSpoofingAdjustment = crossConstellation.spoofingLikelihoodAdjustment,
-            // False positive heuristics
+            // False positive heuristics - now properly populated
+            falsePositiveLikelihood = fpLikelihood,
+            fpIndicators = fpIndicators,
             isLikelyNormalOperation = isLikelyNormalOperation,
-            isLikelyIndoorSignalLoss = isLikelyIndoorAttenuation
+            isLikelyUrbanMultipath = isLikelyUrbanMultipath,
+            isLikelyIndoorSignalLoss = isLikelyIndoorAttenuation,
+            // Satellite count & fix quality
+            totalSatellitesVisible = status.totalSatellites,
+            satellitesUsedInFix = status.satellitesUsedInFix,
+            hasFix = status.hasFix,
+            // DOP values from GnssEnvironmentStatus (null when chipset doesn't provide them)
+            hdop = status.hdop,
+            pdop = status.pdop,
+            // Environment context
+            environmentType = environmentAssessment.signalCharacteristic,
+            environmentConfidence = 1f - environmentAssessment.falsePositiveSuppression,
+            environmentGuidance = environmentAssessment.userGuidance
         )
     }
 

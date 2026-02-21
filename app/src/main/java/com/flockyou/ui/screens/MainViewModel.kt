@@ -11,6 +11,9 @@ import com.flockyou.R
 import com.flockyou.data.BroadcastSettings
 import com.flockyou.data.BroadcastSettingsRepository
 import com.flockyou.data.DetectionSettingsRepository
+import com.flockyou.data.GnssPattern
+import com.flockyou.data.RfPattern
+import com.flockyou.data.UltrasonicPattern
 import com.flockyou.data.FlipperUiSettings
 import com.flockyou.data.FlipperUiSettingsRepository
 import com.flockyou.data.FlipperViewMode
@@ -1087,11 +1090,26 @@ class MainViewModel @Inject constructor(
         cellular: Boolean? = null,
         satellite: Boolean? = null,
         ble: Boolean? = null,
-        wifi: Boolean? = null
+        wifi: Boolean? = null,
+        gnss: Boolean? = null,
+        rf: Boolean? = null,
+        ultrasonic: Boolean? = null
     ) {
         viewModelScope.launch {
-            settingsRepository.setGlobalDetectionEnabled(cellular, satellite, ble, wifi)
+            settingsRepository.setGlobalDetectionEnabled(cellular, satellite, ble, wifi, gnss, rf, ultrasonic)
         }
+    }
+
+    fun toggleGnssPattern(pattern: GnssPattern, enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.toggleGnssPattern(pattern, enabled) }
+    }
+
+    fun toggleRfPattern(pattern: RfPattern, enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.toggleRfPattern(pattern, enabled) }
+    }
+
+    fun toggleUltrasonicPattern(pattern: UltrasonicPattern, enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.toggleUltrasonicPattern(pattern, enabled) }
     }
 
     fun getFilteredDetections(): List<Detection> {

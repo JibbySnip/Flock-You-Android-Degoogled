@@ -1376,6 +1376,12 @@ class DetectionAnalyzer @Inject constructor(
                     PromptTemplates.buildWifiFollowingEnrichedPrompt(detection, enrichedData.analysis)
                 is EnrichedDetectorData.Satellite ->
                     PromptTemplates.buildSatelliteEnrichedPrompt(detection, enrichedData)
+                is EnrichedDetectorData.RfEnvironment ->
+                    PromptTemplates.buildRfEnvironmentEnrichedPrompt(detection, enrichedData)
+                is EnrichedDetectorData.Ble ->
+                    PromptTemplates.buildBleEnrichedPrompt(detection, enrichedData.analysis)
+                is EnrichedDetectorData.WifiSsidMatch ->
+                    PromptTemplates.buildWifiSsidEnrichedPrompt(detection, enrichedData)
             }
         }
 

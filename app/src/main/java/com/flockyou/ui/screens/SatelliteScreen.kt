@@ -402,6 +402,59 @@ fun SatelliteTechnicalDetailsCard(state: SatelliteConnectionState) {
                         TechDetailRow("Frequency", "${freq} MHz")
                     }
 
+                    // Satellite Cell Info
+                    state.cellInfo?.let { ci ->
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = "Satellite Cell Info",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        ci.plmn?.let { TechDetailRow("PLMN", it) }
+                            ?: run {
+                                ci.mcc?.let { TechDetailRow("MCC", it) }
+                                ci.mnc?.let { TechDetailRow("MNC", it) }
+                            }
+                        ci.nci?.let { TechDetailRow("Cell ID (NCI)", it.toString()) }
+                        ci.tac?.let { TechDetailRow("TAC", it.toString()) }
+                        ci.pci?.let { TechDetailRow("PCI", it.toString()) }
+                        ci.nrarfcn?.let { nrarfcn ->
+                            val bandStr = ci.bandName?.let { b -> "$nrarfcn ($b)" } ?: nrarfcn.toString()
+                            TechDetailRow("NRARFCN", bandStr)
+                        }
+
+                        // Signal metrics
+                        if (ci.ssRsrp != null || ci.ssRsrq != null || ci.ssSinr != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Signal Metrics",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            ci.ssRsrp?.let { TechDetailRow("SS-RSRP", "$it dBm") }
+                            ci.ssRsrq?.let { TechDetailRow("SS-RSRQ", "$it dB") }
+                            ci.ssSinr?.let { TechDetailRow("SS-SINR", "$it dB") }
+                            ci.csiRsrp?.let { TechDetailRow("CSI-RSRP", "$it dBm") }
+                            ci.csiRsrq?.let { TechDetailRow("CSI-RSRQ", "$it dB") }
+                            ci.csiSinr?.let { TechDetailRow("CSI-SINR", "$it dB") }
+                        }
+
+                        if (ci.isNtnBand) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "NTN Band Confirmed",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF4CAF50),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Provider-specific info
@@ -1147,6 +1200,9 @@ private fun formatRadioTech(tech: Int): String {
 
 private fun formatAnomalyType(type: SatelliteAnomalyType): String {
     return when (type) {
+        // Informational
+        SatelliteAnomalyType.SATELLITE_SWITCHOVER -> "Satellite Switchover"
+
         // Core anomaly types
         SatelliteAnomalyType.UNEXPECTED_SATELLITE_CONNECTION -> "Unexpected Satellite"
         SatelliteAnomalyType.FORCED_SATELLITE_HANDOFF -> "Forced Handoff"

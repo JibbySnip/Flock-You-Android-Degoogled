@@ -59,6 +59,7 @@ class ScanningService : Service() {
     companion object {
         private const val TAG = "ScanningService"
         private const val NOTIFICATION_ID = 1001
+        private const val SATELLITE_CONNECTION_NOTIF_ID = 9999
         private const val CHANNEL_ID = "flockyou_scanning"
 
         // Broadcast actions for cross-process communication
@@ -2181,10 +2182,19 @@ class ScanningService : Service() {
         
         // Collect satellite state updates
         satelliteStateJob = serviceScope.launch {
+            var wasSatelliteConnected = false
             satelliteMonitor?.satelliteState?.collect { state ->
                 satelliteState.value = state
                 broadcastSatelliteData()
                 Log.d(TAG, "Satellite state updated: connected=${state.isConnected}, type=${state.connectionType}")
+
+                // Send/cancel satellite connection notification on state transitions
+                if (state.isConnected && !wasSatelliteConnected) {
+                    sendSatelliteConnectionNotification(state)
+                } else if (!state.isConnected && wasSatelliteConnected) {
+                    cancelSatelliteConnectionNotification()
+                }
+                wasSatelliteConnected = state.isConnected
             }
         }
 
@@ -2427,6 +2437,11 @@ class ScanningService : Service() {
     private var rfDronesJob: Job? = null
 
     private fun startRfSignalAnalysis() {
+        // Only start RF analysis if RF detection is enabled
+        if (currentDetectionSettings?.enableRfDetection != true) {
+            Log.d(TAG, "RF signal analysis disabled by settings, skipping")
+            return
+        }
         Log.d(TAG, "Starting RF signal analysis")
 
         rfSignalAnalyzer?.startMonitoring()
@@ -2672,6 +2687,13 @@ class ScanningService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun startGnssMonitoring() {
+        // Only start GNSS monitoring if enabled in settings
+        if (currentDetectionSettings?.enableGnssDetection != true) {
+            Log.d(TAG, "GNSS monitoring disabled by settings, skipping")
+            gnssMonitorStatus.value = SubsystemStatus.Disabled
+            return
+        }
+
         if (!hasLocationPermissions()) {
             gnssMonitorStatus.value = SubsystemStatus.PermissionDenied("ACCESS_FINE_LOCATION")
             Log.w(TAG, "Missing location permissions for GNSS monitoring")
@@ -3480,6 +3502,13 @@ class ScanningService : Service() {
             try {
                 val detections = wifiDetectionHandler.processData(results)
 
+                // Store enriched WiFi SSID/MAC match data for LLM analysis
+                val enrichedResults = wifiDetectionHandler.lastEnrichedResults
+                for ((detectionId, enrichedData) in enrichedResults) {
+                    enrichedDataCache.putWifiSsidMatch(detectionId, enrichedData)
+                    Log.d(TAG, "Stored WiFi SSID match heuristics for detection $detectionId (method: ${enrichedData.detectionMethodName})")
+                }
+
                 // Handle each detection
                 for (detection in detections) {
                     handleDetection(detection)
@@ -3811,8 +3840,10 @@ class ScanningService : Service() {
         // but we keep this for backward compatibility with existing rogueWifiMonitor instance
         rogueWifiMonitor?.processScanResults(scanResults)
 
-        // Feed results to RF Signal Analyzer for spectrum analysis
-        rfSignalAnalyzer?.analyzeWifiScan(scanResults)
+        // Feed results to RF Signal Analyzer for spectrum analysis (only if RF detection enabled)
+        if (currentDetectionSettings?.enableRfDetection == true) {
+            rfSignalAnalyzer?.analyzeWifiScan(scanResults)
+        }
     }
 
     /**
@@ -3944,6 +3975,49 @@ class ScanningService : Service() {
         )
 
         startActivity(intent)
+    }
+
+    private fun sendSatelliteConnectionNotification(state: com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState) {
+        val providerName = when (state.provider) {
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.STARLINK -> "Starlink"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.SKYLO -> "Skylo"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.GLOBALSTAR -> "Globalstar"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.AST_SPACEMOBILE -> "AST SpaceMobile"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.LYNK -> "Lynk"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.IRIDIUM -> "Iridium"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.INMARSAT -> "Inmarsat"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.UNKNOWN -> state.networkName ?: "Unknown"
+        }
+        val connectionTypeName = when (state.connectionType) {
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.T_MOBILE_STARLINK -> "T-Mobile Satellite"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.SKYLO_NTN -> "Skylo NTN"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.GENERIC_NTN -> "NTN"
+            com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionType.PROPRIETARY -> "Proprietary Satellite"
+            else -> "Satellite"
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Satellite Connection Active")
+            .setContentText("Connected to $providerName via $connectionTypeName")
+            .setSmallIcon(R.drawable.ic_radar)
+            .setContentIntent(pendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOngoing(true)
+            .build()
+
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.notify(SATELLITE_CONNECTION_NOTIF_ID, notification)
+    }
+
+    private fun cancelSatelliteConnectionNotification() {
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.cancel(SATELLITE_CONNECTION_NOTIF_ID)
     }
 
     private fun sendDetectionNotification(detection: Detection) {

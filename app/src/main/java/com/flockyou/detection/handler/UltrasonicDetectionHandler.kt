@@ -38,6 +38,92 @@ import kotlin.math.abs
  * - Signal360: 19 kHz (proximity marketing)
  * - LISNR: 19.5 kHz (cross-device data transmission)
  * - Shopkick: 20 kHz (retail location verification)
+ *
+ * ## UltrasonicPattern Coverage (DetectionSettings.kt)
+ *
+ * All 6 UltrasonicPattern enum values map to detection logic in this handler:
+ *
+ * | UltrasonicPattern       | BeaconCategory            | DetectionMethod              | Beacon Sources                    |
+ * |-------------------------|---------------------------|------------------------------|-----------------------------------|
+ * | AD_TRACKING             | ADVERTISING               | ULTRASONIC_AD_BEACON         | SilverPush, Realeyes, Data+Math   |
+ * | TV_ATTRIBUTION          | TV_ATTRIBUTION            | ULTRASONIC_AD_BEACON         | Alphonso, Zapr, TVision, Samba TV |
+ * | RETAIL_ANALYTICS        | RETAIL_ANALYTICS          | ULTRASONIC_RETAIL_BEACON     | Shopkick, Retail Band 1/2         |
+ * | CROSS_DEVICE_LINKING    | CROSS_DEVICE_LINKING      | ULTRASONIC_CROSS_DEVICE      | LISNR                             |
+ * | LOCATION_VERIFICATION   | LOCATION_VERIFICATION     | ULTRASONIC_RETAIL_BEACON     | Signal360                         |
+ * | CONTINUOUS_MONITORING   | PRESENCE_DETECTION/UNKNOWN| ULTRASONIC_CONTINUOUS         | Persistent unknown sources        |
+ *
+ * ## Android Feasibility Constraints
+ *
+ * ### RECORD_AUDIO Permission (Android 6+)
+ * Requires runtime RECORD_AUDIO permission. Ultrasonic detection is DISABLED by default
+ * and requires explicit user opt-in due to the sensitive nature of microphone access.
+ * The permission must be granted before UltrasonicDetector.startMonitoring() will proceed.
+ *
+ * ### Foreground Service Requirements (Android 14+, API 34)
+ * Android 14 introduced foreground service types. The ScanningService must declare
+ * `android:foregroundServiceType="microphone"` in the manifest and hold FOREGROUND_SERVICE_MICROPHONE
+ * permission for audio capture in the background. Without this, AudioRecord initialization will
+ * fail when the app is not in the foreground.
+ *
+ * ### Microphone Sharing (Android 14+)
+ * Android 14 allows microphone sharing between foreground apps, but a foreground service
+ * capturing audio may be silenced if a foreground app also captures audio. This means
+ * ultrasonic detection may experience gaps when the user is on a phone call or using a
+ * voice assistant. The detector handles AudioRecord initialization failures gracefully
+ * via consecutiveFailures tracking in UltrasonicDetector.
+ *
+ * ### Battery Impact
+ * Continuous audio monitoring is battery-intensive. The UltrasonicDetector mitigates this
+ * via duty cycling: 5-second scan windows with 20-second intervals (configurable via
+ * updateScanTiming). This yields ~20% microphone duty cycle. Users should be informed
+ * that enabling ultrasonic detection will increase battery consumption.
+ *
+ * ### FFT Processing Feasibility (18-22 kHz)
+ * The 44,100 Hz sample rate provides a Nyquist limit of 22,050 Hz, sufficient for the
+ * 17,500-22,000 Hz detection range. The Goertzel algorithm is used instead of a full FFT
+ * for efficiency, computing magnitude at specific target frequencies only. FFT bin size of
+ * 4096 samples gives ~10.7 Hz frequency resolution, adequate for the 100 Hz tolerance
+ * used in beacon source matching. Processing overhead is minimal on modern ARM processors.
+ *
+ * ### Audio Format Constraints
+ * Uses CHANNEL_IN_MONO + ENCODING_PCM_16BIT at 44,100 Hz. This format is universally
+ * supported on all Android devices. Higher sample rates (48 kHz, 96 kHz) are available
+ * on some devices but 44.1 kHz is sufficient and maximizes compatibility.
+ *
+ * ### Security
+ * Audio samples are processed in SecureAudioBuffer with AES-256-GCM encryption in memory.
+ * Raw audio is never stored to disk. Samples are cleared immediately after frequency analysis.
+ * This ensures no audio content leaks even if the process memory is dumped.
+ */
+/**
+ * ## Rate Limiting Architecture
+ *
+ * Rate limiting for ultrasonic detections is implemented at multiple layers:
+ *
+ * 1. **Scan duty cycling** (UltrasonicDetector): 5-second scan windows every 20 seconds
+ *    (configurable via updateScanTiming). This is the primary battery conservation mechanism.
+ *
+ * 2. **Detection confirmation** (UltrasonicDetector): A beacon must be detected at least
+ *    MIN_DETECTIONS_TO_CONFIRM (5) times before an anomaly is reported. This prevents
+ *    transient noise from generating alerts.
+ *
+ * 3. **Duration gating** (UltrasonicDetector): Beacons must persist for at least
+ *    BEACON_DURATION_THRESHOLD_MS (5 seconds) to pass the alert gate.
+ *
+ * 4. **Anomaly cooldown** (UltrasonicDetector.reportAnomaly): ANOMALY_COOLDOWN_MS (60 seconds)
+ *    between repeated alerts of the same UltrasonicAnomalyType. This prevents alert flooding.
+ *
+ * 5. **Detection deduplication** (DetectionDeduplicator): The global deduplicator applies a
+ *    5-second rapid detection throttle and composite key matching to prevent duplicate
+ *    Detection records in the database.
+ *
+ * 6. **False positive gating** (UltrasonicDetector.buildBeaconAnalysis): Beacons with
+ *    falsePositiveLikelihood > 60% are suppressed entirely. Combined with frequency stability
+ *    checks (true beacons are stable within +/-10Hz) and concurrent beacon noise detection
+ *    (5+ simultaneous frequencies = ambient noise burst).
+ *
+ * This handler (UltrasonicDetectionHandler) is stateless and does not perform rate limiting
+ * itself. It is called by UltrasonicDetector only after all upstream gates have passed.
  */
 @Singleton
 class UltrasonicDetectionHandler @Inject constructor() {
@@ -141,6 +227,23 @@ class UltrasonicDetectionHandler @Inject constructor() {
 
     /**
      * Handle an ultrasonic detection and create a Detection record.
+     *
+     * Produces a [Detection] with:
+     * - protocol = AUDIO
+     * - deviceType = ULTRASONIC_BEACON
+     * - rawData populated with frequency, amplitude, SNR, modulation, and duration
+     * - ssid field repurposed for frequency identifier (e.g., "18000Hz")
+     * - rssi field stores amplitude in dB (integer truncation)
+     * - matchedPatterns contains source attribution and tracking likelihood summary
+     *
+     * The detectionMethod is determined by the [BeaconCategory] of the attributed source,
+     * covering all 6 UltrasonicPattern enum values from DetectionSettings:
+     * - AD_TRACKING -> ULTRASONIC_AD_BEACON (SilverPush, Realeyes, Data+Math)
+     * - TV_ATTRIBUTION -> ULTRASONIC_AD_BEACON (Alphonso, Zapr, TVision, Samba TV, Inscape)
+     * - RETAIL_ANALYTICS -> ULTRASONIC_RETAIL_BEACON (Shopkick, retail bands)
+     * - CROSS_DEVICE_LINKING -> ULTRASONIC_CROSS_DEVICE (LISNR)
+     * - LOCATION_VERIFICATION -> ULTRASONIC_RETAIL_BEACON (Signal360)
+     * - CONTINUOUS_MONITORING -> ULTRASONIC_CONTINUOUS (persistent unknown/presence sources)
      */
     fun handle(context: UltrasonicDetectionContext): Detection {
         val attribution = attributeBeaconSource(context.frequencyHz)
@@ -164,7 +267,8 @@ class UltrasonicDetectionHandler @Inject constructor() {
             threatLevel = threatLevel,
             threatScore = calculateThreatScore(context, attribution, trackingLikelihood),
             manufacturer = attribution.manufacturer,
-            matchedPatterns = buildMatchedPatterns(context, attribution, trackingLikelihood)
+            matchedPatterns = buildMatchedPatterns(context, attribution, trackingLikelihood),
+            rawData = buildRawData(context, attribution)
         )
     }
 
@@ -327,7 +431,9 @@ class UltrasonicDetectionHandler @Inject constructor() {
             BeaconCategory.ADVERTISING -> likelihood += 10f
             BeaconCategory.TV_ATTRIBUTION -> likelihood += 10f
             BeaconCategory.RETAIL_ANALYTICS -> likelihood += 5f
-            else -> {}
+            BeaconCategory.LOCATION_VERIFICATION -> likelihood += 8f
+            BeaconCategory.PRESENCE_DETECTION -> likelihood += 5f
+            BeaconCategory.UNKNOWN -> {}
         }
 
         // Modulation type can indicate sophistication
@@ -426,6 +532,52 @@ class UltrasonicDetectionHandler @Inject constructor() {
 
     // ==================== PRIVATE HELPER METHODS ====================
 
+    /**
+     * Build rawData string with structured frequency/amplitude info for advanced display.
+     *
+     * The rawData field captures the full signal fingerprint for downstream consumers
+     * (LLM prompts, export, advanced UI). Format is a semicolon-delimited key=value string:
+     * - freq: Center frequency in Hz
+     * - amp: Current amplitude in dB
+     * - snr: Signal-to-noise ratio in dB
+     * - noise_floor: Estimated noise floor in dB
+     * - modulation: Modulation type (OOK, FSK, PSK, CHIRP, SPREAD_SPECTRUM, UNKNOWN)
+     * - duration_ms: Detection duration in milliseconds
+     * - detections: Total detection count
+     * - locations: Number of distinct locations where beacon was observed
+     * - persistence: Persistence score (0.0-1.0)
+     * - source: Attributed source name
+     * - category: Beacon category (advertising, tv_attribution, retail, cross_device, etc.)
+     * - is_ultrasonic: Always true (frequency >= 17500 Hz)
+     */
+    private fun buildRawData(
+        context: UltrasonicDetectionContext,
+        attribution: BeaconSourceAttribution
+    ): String {
+        return buildString {
+            append("freq=${context.frequencyHz}")
+            append(";amp=${String.format("%.1f", context.amplitudeDb)}")
+            append(";snr=${String.format("%.1f", context.snrDb)}")
+            append(";noise_floor=${String.format("%.1f", context.noiseFloorDb)}")
+            append(";modulation=${context.modulationType.name}")
+            append(";duration_ms=${context.durationMs}")
+            append(";detections=${context.detectionCount}")
+            append(";locations=${context.detectedLocations}")
+            append(";persistence=${String.format("%.2f", context.persistenceScore)}")
+            append(";source=${attribution.sourceName}")
+            append(";category=${attribution.category.name}")
+            append(";is_ultrasonic=true")
+            if (context.amplitudeHistory.isNotEmpty()) {
+                val avgAmp = context.amplitudeHistory.average()
+                val variance = context.amplitudeHistory.map {
+                    (it - avgAmp) * (it - avgAmp)
+                }.average()
+                append(";avg_amp=${String.format("%.1f", avgAmp)}")
+                append(";amp_variance=${String.format("%.2f", variance)}")
+            }
+        }
+    }
+
     private fun isNearFrequency(detected: Int, target: Int): Boolean {
         return abs(detected - target) <= FREQUENCY_TOLERANCE_HZ
     }
@@ -515,6 +667,20 @@ class UltrasonicDetectionHandler @Inject constructor() {
             return ThreatLevel.MEDIUM
         }
 
+        // Location verification beacons are medium (they confirm physical presence)
+        if (attribution.category == BeaconCategory.LOCATION_VERIFICATION) {
+            return ThreatLevel.MEDIUM
+        }
+
+        // Presence detection beacons are low-medium depending on persistence
+        if (attribution.category == BeaconCategory.PRESENCE_DETECTION) {
+            return if (context.persistenceScore >= HIGH_PERSISTENCE_THRESHOLD) {
+                ThreatLevel.MEDIUM
+            } else {
+                ThreatLevel.LOW
+            }
+        }
+
         // Unknown sources with some detection are low
         if (attribution.category == BeaconCategory.UNKNOWN) {
             return ThreatLevel.LOW
@@ -541,7 +707,10 @@ class UltrasonicDetectionHandler @Inject constructor() {
             BeaconCategory.CROSS_DEVICE_LINKING -> score += 15
             BeaconCategory.ADVERTISING -> score += 10
             BeaconCategory.TV_ATTRIBUTION -> score += 10
-            else -> {}
+            BeaconCategory.LOCATION_VERIFICATION -> score += 8
+            BeaconCategory.RETAIL_ANALYTICS -> score += 5
+            BeaconCategory.PRESENCE_DETECTION -> score += 5
+            BeaconCategory.UNKNOWN -> {}
         }
 
         return score.coerceIn(0, 100)
@@ -631,7 +800,11 @@ class UltrasonicDetectionHandler @Inject constructor() {
                 indicators.add("TV attribution - correlates TV viewing with mobile activity")
             BeaconCategory.RETAIL_ANALYTICS ->
                 indicators.add("Retail analytics - tracks in-store location and behavior")
-            else -> {}
+            BeaconCategory.LOCATION_VERIFICATION ->
+                indicators.add("Location verification - confirms physical presence at a venue or area")
+            BeaconCategory.PRESENCE_DETECTION ->
+                indicators.add("Presence detection - monitors occupancy or proximity to a fixed beacon")
+            BeaconCategory.UNKNOWN -> {}
         }
 
         if (context.modulationType in SOPHISTICATED_MODULATION_TYPES) {

@@ -72,6 +72,45 @@ enum class WifiPattern(val displayName: String, val description: String, val def
 }
 
 /**
+ * GNSS/GPS detection pattern identifiers
+ */
+enum class GnssPattern(val displayName: String, val description: String, val defaultEnabled: Boolean = true) {
+    SPOOFING("GPS Spoofing", "Detects GNSS signal spoofing attempts", true),
+    JAMMING("GPS Jamming", "Detects GNSS signal jamming", true),
+    SIGNAL_ANOMALY("Signal Anomaly", "Detects unusual C/N0 deviations", true),
+    GEOMETRY_ANOMALY("Geometry Anomaly", "Detects abnormal satellite geometry", true),
+    CLOCK_ANOMALY("Clock Anomaly", "Detects suspicious clock drift", true),
+    MULTIPATH("Multipath Detection", "Detects multipath signal interference", false),
+    CONSTELLATION_CROSSCHECK("Constellation Cross-Check", "Cross-validates between GPS/GLONASS/Galileo/BeiDou", false),
+    POSITION_JUMP("Position Jump", "Detects impossible position jumps", true)
+}
+
+/**
+ * RF analysis detection pattern identifiers
+ */
+enum class RfPattern(val displayName: String, val description: String, val defaultEnabled: Boolean = true) {
+    JAMMER("Jammer Detection", "Detects RF jamming devices", true),
+    DRONE("Drone Detection", "Detects surveillance drones via RF", true),
+    SURVEILLANCE_AREA("Surveillance Area", "Detects concentrated surveillance RF activity", true),
+    SPECTRUM_ANOMALY("Spectrum Anomaly", "Detects unusual RF spectrum patterns", false),
+    HIDDEN_NETWORK("Hidden Network", "Detects hidden wireless networks", false),
+    HIDDEN_TRANSMITTER("Hidden Transmitter", "Detects covert RF transmitters", true),
+    INTERFERENCE("RF Interference", "Detects suspicious RF interference patterns", false)
+}
+
+/**
+ * Ultrasonic/audio detection pattern identifiers
+ */
+enum class UltrasonicPattern(val displayName: String, val description: String, val defaultEnabled: Boolean = true) {
+    AD_TRACKING("Ad Tracking Beacons", "Detects ultrasonic ad tracking signals", true),
+    TV_ATTRIBUTION("TV Attribution", "Detects TV content attribution beacons", true),
+    RETAIL_ANALYTICS("Retail Analytics", "Detects in-store tracking beacons", true),
+    CROSS_DEVICE_LINKING("Cross-Device Linking", "Detects cross-device tracking beacons", true),
+    LOCATION_VERIFICATION("Location Verification", "Detects ultrasonic location verification", false),
+    CONTINUOUS_MONITORING("Continuous Monitoring", "Persistent ultrasonic monitoring detection", false)
+}
+
+/**
  * Threshold settings for cellular detection
  */
 data class CellularThresholds(
@@ -116,6 +155,34 @@ data class WifiThresholds(
 )
 
 /**
+ * Threshold settings for GNSS/GPS detection
+ */
+data class GnssThresholds(
+    val cn0DeviationThreshold: Double = 10.0,      // dB-Hz deviation to trigger spoofing alert
+    val clockDriftThreshold: Double = 100.0,        // ns clock drift for anomaly detection
+    val minSatellites: Int = 4,                      // Minimum satellites for valid fix
+    val positionJumpThreshold: Double = 100.0        // Meters for impossible position jump
+)
+
+/**
+ * Threshold settings for RF analysis detection
+ */
+data class RfThresholds(
+    val hiddenNetworkThreshold: Int = 5,             // Number of hidden networks to trigger alert
+    val jammerDetectionThreshold: Int = 30,           // dB signal drop for jammer detection
+    val subGhzFrequencies: String = "315,433,868,915" // Sub-GHz frequencies to monitor (MHz)
+)
+
+/**
+ * Threshold settings for ultrasonic/audio detection
+ */
+data class UltrasonicThresholds(
+    val minAmplitude: Double = -35.0,                // dB minimum amplitude for detection
+    val frequencyRangeStart: Int = 18000,            // Hz start of detection range
+    val frequencyRangeEnd: Int = 22000               // Hz end of detection range
+)
+
+/**
  * Complete detection settings
  */
 data class DetectionSettings(
@@ -135,11 +202,26 @@ data class DetectionSettings(
     val enabledWifiPatterns: Set<WifiPattern> = WifiPattern.values().filter { it.defaultEnabled }.toSet(),
     val wifiThresholds: WifiThresholds = WifiThresholds(),
 
+    // GNSS patterns
+    val enabledGnssPatterns: Set<GnssPattern> = GnssPattern.values().filter { it.defaultEnabled }.toSet(),
+    val gnssThresholds: GnssThresholds = GnssThresholds(),
+
+    // RF patterns
+    val enabledRfPatterns: Set<RfPattern> = RfPattern.values().filter { it.defaultEnabled }.toSet(),
+    val rfThresholds: RfThresholds = RfThresholds(),
+
+    // Ultrasonic patterns
+    val enabledUltrasonicPatterns: Set<UltrasonicPattern> = UltrasonicPattern.values().filter { it.defaultEnabled }.toSet(),
+    val ultrasonicThresholds: UltrasonicThresholds = UltrasonicThresholds(),
+
     // Global settings
     val enableCellularDetection: Boolean = true,
     val enableSatelliteDetection: Boolean = true,
     val enableBleDetection: Boolean = true,
     val enableWifiDetection: Boolean = true,
+    val enableGnssDetection: Boolean = false,          // Disabled by default - high false positive rate
+    val enableRfDetection: Boolean = false,           // Disabled by default - requires Flipper Zero or system privileges
+    val enableUltrasonicDetection: Boolean = false,   // Disabled by default - privacy consent required
     val enableHiddenNetworkRfAnomaly: Boolean = false,  // Disabled by default - high false positive rate
 
     // UI settings
@@ -159,10 +241,18 @@ data class DetectionSettings(
             enabledSatellitePatterns = preset.getEnabledSatellitePatterns(),
             enabledBlePatterns = preset.getEnabledBlePatterns(),
             enabledWifiPatterns = preset.getEnabledWifiPatterns(),
+            enabledGnssPatterns = preset.getEnabledGnssPatterns(),
+            enabledRfPatterns = preset.getEnabledRfPatterns(),
+            enabledUltrasonicPatterns = preset.getEnabledUltrasonicPatterns(),
             cellularThresholds = preset.getCellularThresholds(),
             satelliteThresholds = preset.getSatelliteThresholds(),
             bleThresholds = preset.getBleThresholds(),
             wifiThresholds = preset.getWifiThresholds(),
+            gnssThresholds = preset.getGnssThresholds(),
+            rfThresholds = preset.getRfThresholds(),
+            ultrasonicThresholds = preset.getUltrasonicThresholds(),
+            enableGnssDetection = preset.getEnableGnssDetection(),
+            enableRfDetection = preset.getEnableRfDetection(),
             enableHiddenNetworkRfAnomaly = preset.getEnableHiddenNetworkRfAnomaly(),
             currentPreset = preset
         )
@@ -204,11 +294,19 @@ class DetectionSettingsRepository @Inject constructor(
         // Protection preset
         val CURRENT_PRESET = stringPreferencesKey("current_protection_preset")
         
+        // New protocol toggles
+        val ENABLE_GNSS = booleanPreferencesKey("detection_gnss_enabled")
+        val ENABLE_RF = booleanPreferencesKey("detection_rf_enabled")
+        val ENABLE_ULTRASONIC = booleanPreferencesKey("detection_ultrasonic_enabled")
+
         // Pattern toggles (stored as comma-separated disabled patterns)
         val DISABLED_CELLULAR_PATTERNS = stringPreferencesKey("disabled_cellular_patterns")
         val DISABLED_SATELLITE_PATTERNS = stringPreferencesKey("disabled_satellite_patterns")
         val DISABLED_BLE_PATTERNS = stringPreferencesKey("disabled_ble_patterns")
         val DISABLED_WIFI_PATTERNS = stringPreferencesKey("disabled_wifi_patterns")
+        val DISABLED_GNSS_PATTERNS = stringPreferencesKey("disabled_gnss_patterns")
+        val DISABLED_RF_PATTERNS = stringPreferencesKey("disabled_rf_patterns")
+        val DISABLED_ULTRASONIC_PATTERNS = stringPreferencesKey("disabled_ultrasonic_patterns")
         
         // Cellular thresholds
         val CELL_SIGNAL_SPIKE_THRESHOLD = intPreferencesKey("cell_signal_spike_threshold")
@@ -236,6 +334,22 @@ class DetectionSettingsRepository @Inject constructor(
         val WIFI_TRACKING_DURATION = longPreferencesKey("wifi_tracking_duration")
         val WIFI_TRACKING_COUNT = intPreferencesKey("wifi_tracking_count")
         val WIFI_MIN_TRACKING_DISTANCE = doublePreferencesKey("wifi_min_tracking_distance_meters")
+
+        // GNSS thresholds
+        val GNSS_CN0_DEVIATION = doublePreferencesKey("gnss_cn0_deviation_threshold")
+        val GNSS_CLOCK_DRIFT = doublePreferencesKey("gnss_clock_drift_threshold")
+        val GNSS_MIN_SATELLITES = intPreferencesKey("gnss_min_satellites")
+        val GNSS_POSITION_JUMP = doublePreferencesKey("gnss_position_jump_threshold")
+
+        // RF thresholds
+        val RF_HIDDEN_NETWORK = intPreferencesKey("rf_hidden_network_threshold")
+        val RF_JAMMER_DETECTION = intPreferencesKey("rf_jammer_detection_threshold")
+        val RF_SUB_GHZ_FREQUENCIES = stringPreferencesKey("rf_sub_ghz_frequencies")
+
+        // Ultrasonic thresholds
+        val ULTRASONIC_MIN_AMPLITUDE = doublePreferencesKey("ultrasonic_min_amplitude")
+        val ULTRASONIC_FREQ_START = intPreferencesKey("ultrasonic_freq_range_start")
+        val ULTRASONIC_FREQ_END = intPreferencesKey("ultrasonic_freq_range_end")
     }
     
     val settings: Flow<DetectionSettings> = context.detectionDataStore.data.map { prefs ->
@@ -256,6 +370,18 @@ class DetectionSettingsRepository @Inject constructor(
             try { WifiPattern.valueOf(it) } catch (e: Exception) { null }
         }?.toSet() ?: emptySet()
 
+        val disabledGnss = prefs[Keys.DISABLED_GNSS_PATTERNS]?.split(",")?.mapNotNull {
+            try { GnssPattern.valueOf(it) } catch (e: Exception) { null }
+        }?.toSet() ?: emptySet()
+
+        val disabledRf = prefs[Keys.DISABLED_RF_PATTERNS]?.split(",")?.mapNotNull {
+            try { RfPattern.valueOf(it) } catch (e: Exception) { null }
+        }?.toSet() ?: emptySet()
+
+        val disabledUltrasonic = prefs[Keys.DISABLED_ULTRASONIC_PATTERNS]?.split(",")?.mapNotNull {
+            try { UltrasonicPattern.valueOf(it) } catch (e: Exception) { null }
+        }?.toSet() ?: emptySet()
+
         // Parse current preset
         val currentPreset = prefs[Keys.CURRENT_PRESET]?.let {
             try { ProtectionPreset.valueOf(it) } catch (e: Exception) { null }
@@ -266,6 +392,9 @@ class DetectionSettingsRepository @Inject constructor(
             enableSatelliteDetection = prefs[Keys.ENABLE_SATELLITE] ?: true,
             enableBleDetection = prefs[Keys.ENABLE_BLE] ?: true,
             enableWifiDetection = prefs[Keys.ENABLE_WIFI] ?: true,
+            enableGnssDetection = prefs[Keys.ENABLE_GNSS] ?: false,
+            enableRfDetection = prefs[Keys.ENABLE_RF] ?: false,
+            enableUltrasonicDetection = prefs[Keys.ENABLE_ULTRASONIC] ?: false,
             enableHiddenNetworkRfAnomaly = prefs[Keys.ENABLE_HIDDEN_NETWORK_RF_ANOMALY] ?: false,
             advancedMode = prefs[Keys.ADVANCED_MODE] ?: false,
             showAdvancedSettings = prefs[Keys.SHOW_ADVANCED_SETTINGS] ?: false,
@@ -274,6 +403,9 @@ class DetectionSettingsRepository @Inject constructor(
             enabledSatellitePatterns = SatellitePattern.values().filter { it !in disabledSatellite }.toSet(),
             enabledBlePatterns = BlePattern.values().filter { it !in disabledBle }.toSet(),
             enabledWifiPatterns = WifiPattern.values().filter { it !in disabledWifi }.toSet(),
+            enabledGnssPatterns = GnssPattern.values().filter { it !in disabledGnss }.toSet(),
+            enabledRfPatterns = RfPattern.values().filter { it !in disabledRf }.toSet(),
+            enabledUltrasonicPatterns = UltrasonicPattern.values().filter { it !in disabledUltrasonic }.toSet(),
 
             cellularThresholds = CellularThresholds(
                 signalSpikeThreshold = prefs[Keys.CELL_SIGNAL_SPIKE_THRESHOLD] ?: 25,
@@ -304,6 +436,25 @@ class DetectionSettingsRepository @Inject constructor(
                 trackingDurationMs = prefs[Keys.WIFI_TRACKING_DURATION] ?: 300000L,
                 minSeenCountForTracking = prefs[Keys.WIFI_TRACKING_COUNT] ?: 3,
                 minTrackingDistanceMeters = prefs[Keys.WIFI_MIN_TRACKING_DISTANCE] ?: 1609.0
+            ),
+
+            gnssThresholds = GnssThresholds(
+                cn0DeviationThreshold = prefs[Keys.GNSS_CN0_DEVIATION] ?: 10.0,
+                clockDriftThreshold = prefs[Keys.GNSS_CLOCK_DRIFT] ?: 100.0,
+                minSatellites = prefs[Keys.GNSS_MIN_SATELLITES] ?: 4,
+                positionJumpThreshold = prefs[Keys.GNSS_POSITION_JUMP] ?: 100.0
+            ),
+
+            rfThresholds = RfThresholds(
+                hiddenNetworkThreshold = prefs[Keys.RF_HIDDEN_NETWORK] ?: 5,
+                jammerDetectionThreshold = prefs[Keys.RF_JAMMER_DETECTION] ?: 30,
+                subGhzFrequencies = prefs[Keys.RF_SUB_GHZ_FREQUENCIES] ?: "315,433,868,915"
+            ),
+
+            ultrasonicThresholds = UltrasonicThresholds(
+                minAmplitude = prefs[Keys.ULTRASONIC_MIN_AMPLITUDE] ?: -35.0,
+                frequencyRangeStart = prefs[Keys.ULTRASONIC_FREQ_START] ?: 18000,
+                frequencyRangeEnd = prefs[Keys.ULTRASONIC_FREQ_END] ?: 22000
             ),
 
             currentPreset = currentPreset
@@ -358,19 +509,61 @@ class DetectionSettingsRepository @Inject constructor(
             prefs[Keys.DISABLED_WIFI_PATTERNS] = current.joinToString(",")
         }
     }
-    
+
+    suspend fun toggleGnssPattern(pattern: GnssPattern, enabled: Boolean) {
+        context.detectionDataStore.edit { prefs ->
+            val current = prefs[Keys.DISABLED_GNSS_PATTERNS]?.split(",")?.filter { it.isNotEmpty() }?.toMutableSet() ?: mutableSetOf()
+            if (enabled) {
+                current.remove(pattern.name)
+            } else {
+                current.add(pattern.name)
+            }
+            prefs[Keys.DISABLED_GNSS_PATTERNS] = current.joinToString(",")
+        }
+    }
+
+    suspend fun toggleRfPattern(pattern: RfPattern, enabled: Boolean) {
+        context.detectionDataStore.edit { prefs ->
+            val current = prefs[Keys.DISABLED_RF_PATTERNS]?.split(",")?.filter { it.isNotEmpty() }?.toMutableSet() ?: mutableSetOf()
+            if (enabled) {
+                current.remove(pattern.name)
+            } else {
+                current.add(pattern.name)
+            }
+            prefs[Keys.DISABLED_RF_PATTERNS] = current.joinToString(",")
+        }
+    }
+
+    suspend fun toggleUltrasonicPattern(pattern: UltrasonicPattern, enabled: Boolean) {
+        context.detectionDataStore.edit { prefs ->
+            val current = prefs[Keys.DISABLED_ULTRASONIC_PATTERNS]?.split(",")?.filter { it.isNotEmpty() }?.toMutableSet() ?: mutableSetOf()
+            if (enabled) {
+                current.remove(pattern.name)
+            } else {
+                current.add(pattern.name)
+            }
+            prefs[Keys.DISABLED_ULTRASONIC_PATTERNS] = current.joinToString(",")
+        }
+    }
+
     // Toggle global detection types
     suspend fun setGlobalDetectionEnabled(
         cellular: Boolean? = null,
         satellite: Boolean? = null,
         ble: Boolean? = null,
-        wifi: Boolean? = null
+        wifi: Boolean? = null,
+        gnss: Boolean? = null,
+        rf: Boolean? = null,
+        ultrasonic: Boolean? = null
     ) {
         context.detectionDataStore.edit { prefs ->
             cellular?.let { prefs[Keys.ENABLE_CELLULAR] = it }
             satellite?.let { prefs[Keys.ENABLE_SATELLITE] = it }
             ble?.let { prefs[Keys.ENABLE_BLE] = it }
             wifi?.let { prefs[Keys.ENABLE_WIFI] = it }
+            gnss?.let { prefs[Keys.ENABLE_GNSS] = it }
+            rf?.let { prefs[Keys.ENABLE_RF] = it }
+            ultrasonic?.let { prefs[Keys.ENABLE_ULTRASONIC] = it }
         }
     }
 
@@ -549,6 +742,69 @@ class DetectionSettingsRepository @Inject constructor(
         }
     }
 
+    // Individual GNSS threshold updates
+    suspend fun updateGnssCn0Deviation(value: Double) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.GNSS_CN0_DEVIATION] = value
+        }
+    }
+
+    suspend fun updateGnssClockDrift(value: Double) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.GNSS_CLOCK_DRIFT] = value
+        }
+    }
+
+    suspend fun updateGnssMinSatellites(value: Int) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.GNSS_MIN_SATELLITES] = value
+        }
+    }
+
+    suspend fun updateGnssPositionJump(value: Double) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.GNSS_POSITION_JUMP] = value
+        }
+    }
+
+    // Individual RF threshold updates
+    suspend fun updateRfHiddenNetworkThreshold(value: Int) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.RF_HIDDEN_NETWORK] = value
+        }
+    }
+
+    suspend fun updateRfJammerDetectionThreshold(value: Int) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.RF_JAMMER_DETECTION] = value
+        }
+    }
+
+    suspend fun updateRfSubGhzFrequencies(value: String) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.RF_SUB_GHZ_FREQUENCIES] = value
+        }
+    }
+
+    // Individual Ultrasonic threshold updates
+    suspend fun updateUltrasonicMinAmplitude(value: Double) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.ULTRASONIC_MIN_AMPLITUDE] = value
+        }
+    }
+
+    suspend fun updateUltrasonicFreqStart(value: Int) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.ULTRASONIC_FREQ_START] = value
+        }
+    }
+
+    suspend fun updateUltrasonicFreqEnd(value: Int) {
+        context.detectionDataStore.edit { prefs ->
+            prefs[Keys.ULTRASONIC_FREQ_END] = value
+        }
+    }
+
     // Toggle hidden network RF anomaly detection
     suspend fun setHiddenNetworkRfAnomalyEnabled(enabled: Boolean) {
         context.detectionDataStore.edit { prefs ->
@@ -616,6 +872,41 @@ class DetectionSettingsRepository @Inject constructor(
             prefs[Keys.WIFI_TRACKING_DURATION] = wifiThresholds.trackingDurationMs
             prefs[Keys.WIFI_TRACKING_COUNT] = wifiThresholds.minSeenCountForTracking
             prefs[Keys.WIFI_MIN_TRACKING_DISTANCE] = wifiThresholds.minTrackingDistanceMeters
+
+            // Apply GNSS settings
+            val enabledGnss = preset.getEnabledGnssPatterns()
+            val disabledGnss = GnssPattern.values().filter { it !in enabledGnss }
+            prefs[Keys.DISABLED_GNSS_PATTERNS] = disabledGnss.joinToString(",") { it.name }
+
+            val gnssThresholds = preset.getGnssThresholds()
+            prefs[Keys.GNSS_CN0_DEVIATION] = gnssThresholds.cn0DeviationThreshold
+            prefs[Keys.GNSS_CLOCK_DRIFT] = gnssThresholds.clockDriftThreshold
+            prefs[Keys.GNSS_MIN_SATELLITES] = gnssThresholds.minSatellites
+            prefs[Keys.GNSS_POSITION_JUMP] = gnssThresholds.positionJumpThreshold
+
+            prefs[Keys.ENABLE_GNSS] = preset.getEnableGnssDetection()
+
+            // Apply RF settings
+            val enabledRf = preset.getEnabledRfPatterns()
+            val disabledRf = RfPattern.values().filter { it !in enabledRf }
+            prefs[Keys.DISABLED_RF_PATTERNS] = disabledRf.joinToString(",") { it.name }
+
+            val rfThresholds = preset.getRfThresholds()
+            prefs[Keys.RF_HIDDEN_NETWORK] = rfThresholds.hiddenNetworkThreshold
+            prefs[Keys.RF_JAMMER_DETECTION] = rfThresholds.jammerDetectionThreshold
+            prefs[Keys.RF_SUB_GHZ_FREQUENCIES] = rfThresholds.subGhzFrequencies
+
+            prefs[Keys.ENABLE_RF] = preset.getEnableRfDetection()
+
+            // Apply Ultrasonic settings
+            val enabledUltrasonic = preset.getEnabledUltrasonicPatterns()
+            val disabledUltrasonic = UltrasonicPattern.values().filter { it !in enabledUltrasonic }
+            prefs[Keys.DISABLED_ULTRASONIC_PATTERNS] = disabledUltrasonic.joinToString(",") { it.name }
+
+            val ultrasonicThresholds = preset.getUltrasonicThresholds()
+            prefs[Keys.ULTRASONIC_MIN_AMPLITUDE] = ultrasonicThresholds.minAmplitude
+            prefs[Keys.ULTRASONIC_FREQ_START] = ultrasonicThresholds.frequencyRangeStart
+            prefs[Keys.ULTRASONIC_FREQ_END] = ultrasonicThresholds.frequencyRangeEnd
 
             // Apply hidden network RF anomaly setting
             prefs[Keys.ENABLE_HIDDEN_NETWORK_RF_ANOMALY] = preset.getEnableHiddenNetworkRfAnomaly()

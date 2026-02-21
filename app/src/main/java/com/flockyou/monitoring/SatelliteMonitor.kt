@@ -36,17 +36,73 @@ import java.time.Duration
 
 /**
  * SatelliteMonitor - Detects and monitors satellite connectivity for surveillance detection
- * 
+ *
  * Supports:
  * - T-Mobile Starlink Direct to Cell (3GPP Release 17, launched July 2025)
  * - Skylo NTN (Pixel 9/10 Satellite SOS)
  * - Generic NB-IoT NTN and NR-NTN detection
- * 
+ *
  * Surveillance Detection Heuristics:
  * - Unexpected satellite connections in covered areas
  * - Forced network handoffs to satellite
  * - Unusual NTN parameters suggesting IMSI catcher activity
  * - Satellite connection when terrestrial coverage is available
+ *
+ * == NTN Service Allowlisting ==
+ *
+ * This monitor identifies and tracks known legitimate NTN services via detectProvider()
+ * and detectSatelliteConnectionType(). Known providers are assigned specific
+ * SatelliteProvider and SatelliteConnectionType values rather than UNKNOWN:
+ *
+ * - T-Mobile Starlink: SatelliteConnectionType.T_MOBILE_STARLINK
+ *   Identified by STARLINK_NETWORK_NAMES and T-Mobile PLMNs + NTN indicators
+ * - Skylo NTN: SatelliteConnectionType.SKYLO_NTN
+ *   Identified by SKYLO_NETWORK_NAMES
+ * - Generic 3GPP NTN: SatelliteConnectionType.GENERIC_NTN
+ *   For known carriers (AT&T/AST SpaceMobile) on NTN-indicator PLMNs
+ *
+ * Legitimate services still trigger SATELLITE_SWITCHOVER (INFO) on every connection
+ * to inform the user. Higher-severity anomalies (UNEXPECTED_SATELLITE, FORCED_HANDOFF,
+ * etc.) fire only when contextual indicators suggest the connection is abnormal for
+ * the environment (e.g., good terrestrial signal available, urban area, rapid switching).
+ *
+ * == Rate Limiting ==
+ *
+ * - periodicCheckIntervalMs: default 3s, configurable 5-60s via updateScanTiming()
+ * - anomalyDetectionIntervalMs: runs at 2x the periodic check interval (default 5s)
+ * - Connection-based anomalies fire only on state transitions (not repeated while
+ *   connected), providing implicit deduplication
+ * - RAPID_SATELLITE_SWITCHING uses a 60-second sliding window over connectionHistory
+ *   and triggers at 3+ events
+ * - connectionHistory is capped at 1000 entries to bound memory usage
+ *
+ * == Android API Usage ==
+ *
+ * Primary detection path (API 31+/Android 12):
+ *   TelephonyCallback.DisplayInfoListener -> handleDisplayInfoChange()
+ *   TelephonyCallback.ServiceStateListener -> handleServiceStateChange()
+ *   TelephonyCallback.SignalStrengthsListener -> handleSignalStrengthChange()
+ *
+ * ServiceState NTN detection (API 30+/Android 11):
+ *   ServiceState.getNetworkRegistrationInfoList() is checked for NTN keywords
+ *   in the registration info toString() output, plus NRARFCN NTN band validation
+ *
+ * SatelliteManager (API 34+/Android 14, reflection-based):
+ *   requestIsEnabled(), requestIsProvisioned(), requestIsSupported()
+ *   registerForModemStateChanged() (TODO: full callback implementation)
+ *   requestNtnSignalStrength() (API 35+/Android 15)
+ *
+ * CellInfoNr extraction:
+ *   CellIdentityNr.getNrarfcn() for NTN band identification
+ *   CellSignalStrengthNr for ssRSRP/ssRSRQ/ssSINR measurements
+ *
+ * Network RTT measurement:
+ *   HTTP HEAD to configurable DNS endpoints (NetworkConfig.DNS_CHECK_URLS)
+ *   3 measurements, median used for orbit estimation
+ *   Note: This measures application-layer RTT, not true radio RTT. It includes
+ *   server processing time and any backhaul latency, so it is an upper bound
+ *   on the satellite link RTT. Sufficient for distinguishing LEO (<100ms) from
+ *   GEO (>250ms) and detecting ground-based spoofing (<15ms).
  */
 class SatelliteMonitor(
     private val context: Context,
@@ -61,7 +117,11 @@ class SatelliteMonitor(
             "T-Mobile SpaceX",
             "T-Sat+Starlink",
             "Starlink",
-            "T-Satellite"
+            "T-Satellite",
+            "T-SAT",
+            "TSAT",
+            "TMO SAT",
+            "SpaceX"
         )
         
         // Skylo NTN Network Identifiers (Pixel 9/10)
@@ -407,7 +467,9 @@ class SatelliteMonitor(
         val nrarfcn: Int? = null,                    // NR ARFCN from CellInfoNr
         val measuredRttMs: Long? = null,             // Network round-trip time
         val estimatedOrbit: OrbitType = OrbitType.UNKNOWN,
-        val satelliteManagerSupported: Boolean = false
+        val satelliteManagerSupported: Boolean = false,
+        // Satellite cell info
+        val cellInfo: SatelliteCellInfo? = null
     )
     
     enum class SatelliteConnectionType {
@@ -461,6 +523,32 @@ class SatelliteMonitor(
     data class NtnSignalStrength(
         val level: Int,          // 0-4 signal level
         val dbm: Int?            // dBm value if available
+    )
+
+    /**
+     * Extracted cell info when on satellite NTN connection
+     */
+    data class SatelliteCellInfo(
+        val mcc: String? = null,           // Mobile Country Code
+        val mnc: String? = null,           // Mobile Network Code
+        val plmn: String? = null,          // Combined MCC+MNC
+        val nci: Long? = null,             // NR Cell Identity
+        val tac: Int? = null,              // Tracking Area Code
+        val pci: Int? = null,              // Physical Cell ID
+        val nrarfcn: Int? = null,          // NR ARFCN
+        val rsrp: Int? = null,            // Reference Signal Received Power (dBm)
+        val rsrq: Int? = null,            // Reference Signal Received Quality (dB)
+        val sinr: Int? = null,            // Signal to Interference+Noise Ratio (dB)
+        val csiRsrp: Int? = null,         // CSI-RSRP
+        val csiRsrq: Int? = null,         // CSI-RSRQ
+        val csiSinr: Int? = null,         // CSI-SINR
+        val ssRsrp: Int? = null,          // SS-RSRP
+        val ssRsrq: Int? = null,          // SS-RSRQ
+        val ssSinr: Int? = null,          // SS-SINR
+        val signalStrength: NtnSignalStrength? = null,
+        val isNtnBand: Boolean = false,
+        val bandName: String? = null,
+        val timestamp: Long = System.currentTimeMillis()
     )
 
     data class SatelliteCapabilities(
@@ -744,6 +832,9 @@ class SatelliteMonitor(
     )
     
     enum class SatelliteAnomalyType {
+        // === Informational ===
+        SATELLITE_SWITCHOVER,               // Normal terrestrial-to-satellite transition (always fires)
+
         // === Original Anomalies ===
         UNEXPECTED_SATELLITE_CONNECTION,    // Connected to satellite when terrestrial available
         FORCED_SATELLITE_HANDOFF,           // Rapid or suspicious handoff to satellite
@@ -997,6 +1088,7 @@ class SatelliteMonitor(
             val wasConnectedBefore = _satelliteState.value.isConnected
             
             if (connectionType != SatelliteConnectionType.NONE) {
+                val cellInfo = extractSatelliteCellInfo()
                 val newState = SatelliteConnectionState(
                     isConnected = true,
                     connectionType = connectionType,
@@ -1004,9 +1096,13 @@ class SatelliteMonitor(
                     operatorName = simOperator,
                     radioTechnology = mapNetworkTypeToNTN(networkType),
                     provider = detectProvider(operatorName),
-                    capabilities = getCapabilitiesForProvider(connectionType)
+                    capabilities = getCapabilitiesForProvider(connectionType),
+                    nrarfcn = cellInfo?.nrarfcn,
+                    ntnSignalStrength = cellInfo?.signalStrength,
+                    cellInfo = cellInfo,
+                    satelliteManagerSupported = _satelliteState.value.satelliteManagerSupported
                 )
-                
+
                 _satelliteState.value = newState
                 
                 // Log connection event
@@ -1033,21 +1129,58 @@ class SatelliteMonitor(
     private fun handleServiceStateChange(serviceState: ServiceState) {
         coroutineScope.launch {
             val operatorName = serviceState.operatorAlphaLong ?: ""
-            
+            val operatorNumeric = serviceState.operatorNumeric ?: ""
+
             // Check for NTN-specific service state
+            var ntnDetectedViaRegInfo = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val networkRegInfo = serviceState.networkRegistrationInfoList
-                
+
                 networkRegInfo.forEach { regInfo ->
-                    // Check for satellite access network
-                    checkNetworkRegistrationForSatellite(regInfo)
+                    if (checkNetworkRegistrationForSatellite(regInfo)) {
+                        ntnDetectedViaRegInfo = true
+                    }
                 }
             }
-            
-            // Detect satellite by operator name
-            val connectionType = detectSatelliteConnectionType(operatorName, "")
-            if (connectionType != SatelliteConnectionType.NONE) {
-                Log.i(TAG, "Satellite detected via ServiceState: $operatorName")
+
+            // Detect satellite by operator name + PLMN
+            val connectionType = detectSatelliteConnectionType(operatorName, "", operatorNumeric)
+            val wasConnectedBefore = _satelliteState.value.isConnected
+
+            if (connectionType != SatelliteConnectionType.NONE || ntnDetectedViaRegInfo) {
+                val effectiveType = if (connectionType != SatelliteConnectionType.NONE) connectionType
+                    else SatelliteConnectionType.GENERIC_NTN
+
+                Log.i(TAG, "Satellite detected via ServiceState: $operatorName (PLMN=$operatorNumeric, regInfo=$ntnDetectedViaRegInfo)")
+
+                val cellInfo = extractSatelliteCellInfo()
+                val newState = SatelliteConnectionState(
+                    isConnected = true,
+                    connectionType = effectiveType,
+                    networkName = operatorName.ifEmpty { _satelliteState.value.networkName },
+                    operatorName = operatorNumeric.ifEmpty { _satelliteState.value.operatorName },
+                    radioTechnology = _satelliteState.value.radioTechnology,
+                    provider = detectProvider(operatorName),
+                    capabilities = getCapabilitiesForProvider(effectiveType),
+                    nrarfcn = cellInfo?.nrarfcn ?: _satelliteState.value.nrarfcn,
+                    ntnSignalStrength = cellInfo?.signalStrength,
+                    cellInfo = cellInfo,
+                    satelliteManagerSupported = _satelliteState.value.satelliteManagerSupported
+                )
+
+                _satelliteState.value = newState
+
+                if (!wasConnectedBefore) {
+                    recordConnectionEvent(newState, false)
+                    checkForConnectionAnomaly(newState)
+                }
+            } else if (wasConnectedBefore && operatorName.isNotEmpty()) {
+                // Check if we've left satellite
+                val currentPlmn = try { telephonyManager.networkOperator ?: "" } catch (_: Exception) { "" }
+                if (currentPlmn.isNotEmpty() && currentPlmn !in KNOWN_NTN_PLMNS) {
+                    _satelliteState.value = SatelliteConnectionState(isConnected = false)
+                    updateTerrestrialBaseline()
+                }
             }
         }
     }
@@ -1077,29 +1210,49 @@ class SatelliteMonitor(
     }
     
     /**
-     * Detect satellite connection type from network name
+     * Detect satellite connection type from network name and/or PLMN
      */
     private fun detectSatelliteConnectionType(
         operatorName: String,
-        simOperator: String
+        simOperator: String,
+        plmn: String? = null
     ): SatelliteConnectionType {
         val combinedName = "$operatorName $simOperator".uppercase()
-        
-        // T-Mobile Starlink
+
+        // T-Mobile Starlink - check by name
         if (STARLINK_NETWORK_NAMES.any { combinedName.contains(it.uppercase()) }) {
             return SatelliteConnectionType.T_MOBILE_STARLINK
         }
-        
+
+        // T-Mobile Starlink - check by PLMN (MCC+MNC) if name didn't match
+        // T-Mobile satellite uses same PLMNs: 310260, 311490, 310120
+        val effectivePlmn = plmn ?: try {
+            telephonyManager.networkOperator ?: ""
+        } catch (_: Exception) { "" }
+
+        if (effectivePlmn.isNotEmpty() && effectivePlmn in KNOWN_NTN_PLMNS) {
+            // PLMN is a known NTN operator - check if we're actually on satellite
+            // by looking for NTN-band NRARFCN or satellite indicators in service state
+            if (combinedName.contains("SAT") || combinedName.contains("NTN") ||
+                combinedName.contains("D2D") || combinedName.contains("SATELLITE")) {
+                return when (effectivePlmn) {
+                    "310260", "311490", "310120" -> SatelliteConnectionType.T_MOBILE_STARLINK
+                    "310410" -> SatelliteConnectionType.GENERIC_NTN // AT&T/AST SpaceMobile
+                    else -> SatelliteConnectionType.GENERIC_NTN
+                }
+            }
+        }
+
         // Skylo NTN (Pixel)
         if (SKYLO_NETWORK_NAMES.any { combinedName.contains(it.uppercase()) }) {
             return SatelliteConnectionType.SKYLO_NTN
         }
-        
+
         // Generic satellite indicators
         if (SATELLITE_NETWORK_INDICATORS.any { combinedName.contains(it.uppercase()) }) {
             return SatelliteConnectionType.GENERIC_NTN
         }
-        
+
         return SatelliteConnectionType.NONE
     }
     
@@ -1109,7 +1262,9 @@ class SatelliteMonitor(
     private fun detectProvider(networkName: String): SatelliteProvider {
         val name = networkName.uppercase()
         return when {
-            name.contains("STARLINK") || name.contains("SPACEX") -> SatelliteProvider.STARLINK
+            name.contains("STARLINK") || name.contains("SPACEX") ||
+                name.contains("T-SAT") || name.contains("TSAT") ||
+                name.contains("T-SATELLITE") || name.contains("TMO SAT") -> SatelliteProvider.STARLINK
             name.contains("SKYLO") -> SatelliteProvider.SKYLO
             name.contains("GLOBALSTAR") -> SatelliteProvider.GLOBALSTAR
             name.contains("AST") -> SatelliteProvider.AST_SPACEMOBILE
@@ -1166,17 +1321,44 @@ class SatelliteMonitor(
      * Check network registration for satellite indicators
      */
     @RequiresApi(Build.VERSION_CODES.R)
-    private fun checkNetworkRegistrationForSatellite(regInfo: NetworkRegistrationInfo) {
+    private fun checkNetworkRegistrationForSatellite(regInfo: NetworkRegistrationInfo): Boolean {
         val accessNetworkTech = regInfo.accessNetworkTechnology
         val domain = regInfo.domain
-        
-        // NTN would typically show as specific access network technology
-        // This is where we'd check for NTN-specific indicators
-        
-        // Check available services
         val availableServices = regInfo.availableServices
-        
-        Log.d(TAG, "Network Registration: tech=$accessNetworkTech, domain=$domain, services=$availableServices")
+        val isRegistered = regInfo.isRegistered
+
+        Log.d(TAG, "Network Registration: tech=$accessNetworkTech, domain=$domain, services=$availableServices, registered=$isRegistered")
+
+        if (!isRegistered) return false
+
+        // Check if access network technology indicates NTN
+        // On Android 14+, NR-NTN may report as NETWORK_TYPE_NR with satellite indicators
+        // Check the registration info's string representation for NTN/satellite keywords
+        val regInfoStr = regInfo.toString().uppercase()
+        val isNtn = regInfoStr.contains("NTN") ||
+                regInfoStr.contains("SATELLITE") ||
+                regInfoStr.contains("NON_TERRESTRIAL") ||
+                regInfoStr.contains("NON-TERRESTRIAL")
+
+        if (isNtn) {
+            Log.i(TAG, "NTN detected in NetworkRegistrationInfo: $regInfoStr")
+            return true
+        }
+
+        // Also check if NR tech + known NTN PLMN suggests satellite
+        if (accessNetworkTech == TelephonyManager.NETWORK_TYPE_NR) {
+            val plmn = try { telephonyManager.networkOperator ?: "" } catch (_: Exception) { "" }
+            if (plmn in KNOWN_NTN_PLMNS) {
+                // NR on a known NTN PLMN - check NRARFCN for NTN band
+                val nrarfcn = extractNrArfcn()
+                if (nrarfcn != null && NTNBands.isValidNtnArfcn(nrarfcn)) {
+                    Log.i(TAG, "NTN band NRARFCN detected: $nrarfcn on PLMN $plmn")
+                    return true
+                }
+            }
+        }
+
+        return false
     }
     
     /**
@@ -1220,6 +1402,23 @@ class SatelliteMonitor(
      * Check for connection anomalies
      */
     private suspend fun checkForConnectionAnomaly(state: SatelliteConnectionState) {
+        // Informational: Always emit switchover alert on any new satellite connection
+        _anomalies.emit(SatelliteAnomaly(
+            type = SatelliteAnomalyType.SATELLITE_SWITCHOVER,
+            severity = AnomalySeverity.INFO,
+            description = "Device switched to satellite connection (${state.networkName ?: state.connectionType.name})",
+            technicalDetails = mapOf(
+                "satelliteNetwork" to (state.networkName ?: "Unknown"),
+                "connectionType" to state.connectionType.name,
+                "provider" to state.provider.name
+            ),
+            recommendations = listOf(
+                "Your device is now using a satellite connection instead of terrestrial cellular",
+                "This is normal in areas with poor cellular coverage",
+                "Monitor for additional anomalies that may indicate suspicious activity"
+            )
+        ))
+
         // Anomaly 1: Unexpected satellite when terrestrial available
         if (lastTerrestrialSignal != null && 
             lastTerrestrialSignal!! > MIN_SIGNAL_FOR_TERRESTRIAL_DBM &&
@@ -1359,17 +1558,35 @@ class SatelliteMonitor(
     @RequiresPermission(Manifest.permission.READ_PHONE_STATE)
     private fun checkCurrentState() {
         val operatorName = telephonyManager.networkOperatorName ?: ""
-        val connectionType = detectSatelliteConnectionType(operatorName, "")
+        val plmn = telephonyManager.networkOperator ?: ""
+        val simOperator = telephonyManager.simOperatorName ?: ""
+        val connectionType = detectSatelliteConnectionType(operatorName, simOperator, plmn)
 
         if (connectionType != SatelliteConnectionType.NONE && !_satelliteState.value.isConnected) {
-            // Satellite detected but not tracked - update state
+            val cellInfo = extractSatelliteCellInfo()
             _satelliteState.value = SatelliteConnectionState(
                 isConnected = true,
                 connectionType = connectionType,
                 networkName = operatorName,
+                operatorName = plmn,
                 provider = detectProvider(operatorName),
-                capabilities = getCapabilitiesForProvider(connectionType)
+                capabilities = getCapabilitiesForProvider(connectionType),
+                nrarfcn = cellInfo?.nrarfcn,
+                ntnSignalStrength = cellInfo?.signalStrength,
+                cellInfo = cellInfo,
+                satelliteManagerSupported = _satelliteState.value.satelliteManagerSupported
             )
+        } else if (_satelliteState.value.isConnected) {
+            // Already connected - refresh cell info
+            val cellInfo = extractSatelliteCellInfo()
+            if (cellInfo != null) {
+                _satelliteState.value = _satelliteState.value.copy(
+                    nrarfcn = cellInfo.nrarfcn ?: _satelliteState.value.nrarfcn,
+                    ntnSignalStrength = cellInfo.signalStrength ?: _satelliteState.value.ntnSignalStrength,
+                    cellInfo = cellInfo,
+                    lastUpdate = System.currentTimeMillis()
+                )
+            }
         }
 
         // Report successful check for health monitoring
@@ -1467,6 +1684,84 @@ class SatelliteMonitor(
                 }
         } catch (e: Exception) {
             Log.e(TAG, "Error extracting NRARFCN", e)
+            null
+        }
+    }
+
+    /**
+     * Extract comprehensive satellite cell info from CellInfoNr
+     */
+    @SuppressLint("MissingPermission")
+    private fun extractSatelliteCellInfo(): SatelliteCellInfo? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+
+        return try {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE)
+                != PackageManager.PERMISSION_GRANTED) {
+                return null
+            }
+
+            @Suppress("DEPRECATION")
+            val cellInfoList = telephonyManager.allCellInfo ?: return null
+
+            val nrCell = cellInfoList
+                .filterIsInstance<CellInfoNr>()
+                .firstOrNull { it.isRegistered }
+                ?: return null
+
+            val identity = nrCell.cellIdentity as? CellIdentityNr ?: return null
+            val signal = nrCell.cellSignalStrength as? CellSignalStrengthNr
+
+            val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                identity.mccString
+            } else null
+            val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                identity.mncString
+            } else null
+            val nrarfcn = identity.nrarfcn.takeIf { it != Int.MAX_VALUE && it > 0 }
+            val pci = identity.pci.takeIf { it != Int.MAX_VALUE && it >= 0 }
+            val tac = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                identity.tac.takeIf { it != Int.MAX_VALUE && it >= 0 }
+            } else null
+            val nci = identity.nci.takeIf { it != Long.MAX_VALUE && it >= 0 }
+
+            val ssRsrp = signal?.ssRsrp?.takeIf { it != Int.MAX_VALUE && it != Int.MIN_VALUE }
+            val ssRsrq = signal?.ssRsrq?.takeIf { it != Int.MAX_VALUE && it != Int.MIN_VALUE }
+            val ssSinr = signal?.ssSinr?.takeIf { it != Int.MAX_VALUE && it != Int.MIN_VALUE }
+            val csiRsrp = signal?.csiRsrp?.takeIf { it != Int.MAX_VALUE && it != Int.MIN_VALUE }
+            val csiRsrq = signal?.csiRsrq?.takeIf { it != Int.MAX_VALUE && it != Int.MIN_VALUE }
+            val csiSinr = signal?.csiSinr?.takeIf { it != Int.MAX_VALUE && it != Int.MIN_VALUE }
+            val level = signal?.level ?: 0
+            val dbm = signal?.dbm?.takeIf { it != Int.MAX_VALUE && it != Int.MIN_VALUE }
+
+            val isNtnBand = nrarfcn != null && NTNBands.isValidNtnArfcn(nrarfcn)
+            val bandName = nrarfcn?.let { NTNBands.getNtnBandFromArfcn(it) }
+
+            Log.d(TAG, "Satellite CellInfo: MCC=$mcc MNC=$mnc NCI=$nci TAC=$tac PCI=$pci NRARFCN=$nrarfcn ssRSRP=$ssRsrp NTN=$isNtnBand")
+
+            SatelliteCellInfo(
+                mcc = mcc,
+                mnc = mnc,
+                plmn = if (mcc != null && mnc != null) "$mcc$mnc" else null,
+                nci = nci,
+                tac = tac,
+                pci = pci,
+                nrarfcn = nrarfcn,
+                rsrp = ssRsrp,
+                rsrq = ssRsrq,
+                sinr = ssSinr,
+                csiRsrp = csiRsrp,
+                csiRsrq = csiRsrq,
+                csiSinr = csiSinr,
+                ssRsrp = ssRsrp,
+                ssRsrq = ssRsrq,
+                ssSinr = ssSinr,
+                signalStrength = NtnSignalStrength(level = level, dbm = dbm),
+                isNtnBand = isNtnBand,
+                bandName = bandName
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error extracting satellite cell info", e)
             null
         }
     }
@@ -2062,6 +2357,9 @@ class SatelliteMonitor(
      */
     private fun mapAnomalyToDetectionMethod(type: SatelliteAnomalyType): DetectionMethod {
         return when (type) {
+            // Informational
+            SatelliteAnomalyType.SATELLITE_SWITCHOVER -> DetectionMethod.SAT_UNEXPECTED_CONNECTION
+
             // Original anomalies
             SatelliteAnomalyType.UNEXPECTED_SATELLITE_CONNECTION -> DetectionMethod.SAT_UNEXPECTED_CONNECTION
             SatelliteAnomalyType.FORCED_SATELLITE_HANDOFF -> DetectionMethod.SAT_FORCED_HANDOFF

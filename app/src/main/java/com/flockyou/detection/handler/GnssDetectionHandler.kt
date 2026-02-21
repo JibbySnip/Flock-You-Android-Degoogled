@@ -136,11 +136,11 @@ class GnssDetectionHandler @Inject constructor() {
     companion object {
         private const val TAG = "GnssDetectionHandler"
 
-        // Detection thresholds - calibrated to reduce false positives
-        private const val SPOOFING_HIGH_THRESHOLD = 70f
-        private const val SPOOFING_MEDIUM_THRESHOLD = 40f
-        private const val JAMMING_HIGH_THRESHOLD = 70f
-        private const val JAMMING_MEDIUM_THRESHOLD = 40f
+        // Detection thresholds - set high to eliminate false positives
+        private const val SPOOFING_HIGH_THRESHOLD = 85f
+        private const val SPOOFING_MEDIUM_THRESHOLD = 75f
+        private const val JAMMING_HIGH_THRESHOLD = 85f
+        private const val JAMMING_MEDIUM_THRESHOLD = 75f
 
         // C/N0 thresholds - calibrated based on real-world GNSS behavior
         // Normal GNSS signals have variance of 0.5-5.0 due to different elevation angles,
@@ -754,16 +754,16 @@ class GnssDetectionHandler @Inject constructor() {
 
         // Signal uniformity - only flag if EXTREMELY uniform (< 0.15)
         // Normal variance is 0.5-5.0, so 0.53 (from debug data) should NOT be flagged
+        // Removed: +5 score for variance < 0.5 since that's actually normal behavior
         if (context.cn0Variance < CN0_VARIANCE_SUSPICIOUS && context.satelliteCount >= 4) {
             score += 25f
-        } else if (context.cn0Variance < CN0_VARIANCE_WARNING && context.satelliteCount >= 4) {
-            // Low variance but not extremely low - only minor contribution
-            score += 5f
         }
+        // Note: variance 0.5 is NORMAL - no score contribution for this range
 
         // Low elevation with high signal - strong spoofing indicator
-        if (context.lowElevHighSignalCount > 2) {
-            score += context.lowElevHighSignalCount * 10f
+        // Require more satellites (> 3 instead of > 2) and reduce per-satellite points
+        if (context.lowElevHighSignalCount > 3) {
+            score += context.lowElevHighSignalCount * 8f  // Reduced from 10f
         }
 
         // Poor geometry
@@ -776,12 +776,12 @@ class GnssDetectionHandler @Inject constructor() {
             score += 10f  // Single constellation unusual
         }
 
-        // Clock drift anomalies
-        if (context.driftJumpCount > DRIFT_JUMP_SUSPICIOUS) {
-            score += 15f
+        // Clock drift anomalies - require more jumps and reduce impact
+        if (context.driftJumpCount > 5) {  // Raised from DRIFT_JUMP_SUSPICIOUS (3)
+            score += 10f  // Reduced from 15f
         }
         if (context.driftTrend == DriftTrend.ERRATIC) {
-            score += 10f
+            score += 5f   // Reduced from 10f
         }
 
         // C/N0 deviation from baseline
@@ -798,16 +798,16 @@ class GnssDetectionHandler @Inject constructor() {
         // CRITICAL: Strong satellite fix reduces spoofing likelihood
         // Spoofing 30+ satellites across multiple constellations is extremely difficult
         if (context.satelliteCount >= STRONG_FIX_SATELLITES) {
-            score *= 0.3f  // 70% reduction for very strong fix
+            score *= 0.1f  // 90% reduction for very strong fix
         } else if (context.satelliteCount >= GOOD_FIX_SATELLITES) {
-            score *= 0.6f  // 40% reduction for good fix
+            score *= 0.3f  // 70% reduction for good fix
         }
 
         // Multiple constellations also reduce spoofing likelihood
         if (context.constellations.size >= 4) {
-            score *= 0.7f  // 30% reduction for 4+ constellations
+            score *= 0.5f  // 50% reduction for 4+ constellations
         } else if (context.constellations.size >= 3) {
-            score *= 0.85f  // 15% reduction for 3 constellations
+            score *= 0.7f  // 30% reduction for 3 constellations
         }
 
         return score.coerceIn(0f, 100f)

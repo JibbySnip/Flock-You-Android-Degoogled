@@ -24,7 +24,10 @@ enum class DetectionCategory {
     CELLULAR,
     SATELLITE,
     BLE,
-    WIFI
+    WIFI,
+    GNSS,
+    RF,
+    AUDIO
 }
 
 /**
@@ -35,6 +38,9 @@ fun DetectionCategory.toIcon(): ImageVector = when (this) {
     DetectionCategory.SATELLITE -> Icons.Default.SatelliteAlt
     DetectionCategory.BLE -> Icons.Default.Bluetooth
     DetectionCategory.WIFI -> Icons.Default.Wifi
+    DetectionCategory.GNSS -> Icons.Default.GpsFixed
+    DetectionCategory.RF -> Icons.Default.Radio
+    DetectionCategory.AUDIO -> Icons.Default.Mic
 }
 
 /**
@@ -45,6 +51,9 @@ fun DetectionCategory.toDisplayName(): String = when (this) {
     DetectionCategory.SATELLITE -> "Satellite"
     DetectionCategory.BLE -> "BLE"
     DetectionCategory.WIFI -> "WiFi"
+    DetectionCategory.GNSS -> "GNSS/GPS"
+    DetectionCategory.RF -> "RF Analysis"
+    DetectionCategory.AUDIO -> "Ultrasonic"
 }
 
 /**

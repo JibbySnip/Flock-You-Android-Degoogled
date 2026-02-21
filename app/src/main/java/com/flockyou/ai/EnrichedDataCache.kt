@@ -109,6 +109,23 @@ class EnrichedDataCache @Inject constructor() {
     }
 
     /**
+     * Store WiFi SSID/MAC match enriched data for a detection.
+     *
+     * This is for standard WiFi pattern match detections (SSID regex, MAC OUI prefix)
+     * that need scan context for LLM analysis.
+     */
+    fun putWifiSsidMatch(detectionId: String, data: EnrichedDetectorData.WifiSsidMatch) {
+        put(detectionId, data)
+    }
+
+    /**
+     * Store BLE analysis data for a detection.
+     */
+    fun putBle(detectionId: String, analysis: BleAnalysisData) {
+        put(detectionId, EnrichedDetectorData.Ble(analysis))
+    }
+
+    /**
      * Store satellite/NTN enriched data for a detection.
      */
     fun putSatellite(
@@ -126,6 +143,13 @@ class EnrichedDataCache @Inject constructor() {
             riskIndicators = riskIndicators,
             timestamp = timestamp
         ))
+    }
+
+    /**
+     * Store RF environment enriched data for a detection.
+     */
+    fun putRfEnvironment(detectionId: String, data: EnrichedDetectorData.RfEnvironment) {
+        put(detectionId, data)
     }
 
     /**
@@ -182,6 +206,8 @@ class EnrichedDataCache @Inject constructor() {
         var ultrasonicCount = 0
         var wifiCount = 0
         var satelliteCount = 0
+        var bleCount = 0
+        var rfCount = 0
 
         cache.values.forEach { entry ->
             if (entry.isExpired()) expiredCount++
@@ -190,7 +216,11 @@ class EnrichedDataCache @Inject constructor() {
                 is EnrichedDetectorData.Gnss -> gnssCount++
                 is EnrichedDetectorData.Ultrasonic -> ultrasonicCount++
                 is EnrichedDetectorData.WifiFollowing -> wifiCount++
+                is EnrichedDetectorData.WifiSsidMatch -> wifiCount++
                 is EnrichedDetectorData.Satellite -> satelliteCount++
+                is EnrichedDetectorData.Ble -> bleCount++
+                is EnrichedDetectorData.RfEnvironment -> rfCount++
+                else -> {}
             }
         }
 
@@ -201,7 +231,9 @@ class EnrichedDataCache @Inject constructor() {
             gnssEntries = gnssCount,
             ultrasonicEntries = ultrasonicCount,
             wifiEntries = wifiCount,
-            satelliteEntries = satelliteCount
+            satelliteEntries = satelliteCount,
+            bleEntries = bleCount,
+            rfEntries = rfCount
         )
     }
 
@@ -212,6 +244,8 @@ class EnrichedDataCache @Inject constructor() {
         val gnssEntries: Int,
         val ultrasonicEntries: Int,
         val wifiEntries: Int,
-        val satelliteEntries: Int
+        val satelliteEntries: Int,
+        val bleEntries: Int = 0,
+        val rfEntries: Int = 0
     )
 }

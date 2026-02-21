@@ -3,7 +3,10 @@ package com.flockyou
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Intent
 import android.os.Build
+import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import com.flockyou.ai.DetectionAnalyzer
@@ -11,6 +14,8 @@ import com.flockyou.data.AiSettingsRepository
 import com.flockyou.data.NukeSettingsRepository
 import com.flockyou.data.OuiSettingsRepository
 import com.flockyou.data.repository.OuiRepository
+import com.flockyou.service.BootReceiver
+import com.flockyou.service.ScanningService
 import com.flockyou.util.NotificationChannelIds
 import com.flockyou.worker.BackgroundAnalysisWorker
 import com.flockyou.worker.DeadManSwitchWorker
@@ -25,6 +30,10 @@ import javax.inject.Inject
 
 @HiltAndroidApp
 class FlockYouApplication : Application(), Configuration.Provider {
+
+    companion object {
+        private const val TAG = "FlockYouApplication"
+    }
 
     @Inject
     lateinit var workerFactory: HiltWorkerFactory
@@ -57,6 +66,9 @@ class FlockYouApplication : Application(), Configuration.Provider {
         // Create all notification channels at app startup
         createNotificationChannels()
 
+        // Initialize OEM defaults and auto-start service for OEM builds
+        initializeOemBackground()
+
         // Initialize OUI database updates
         applicationScope.launch {
             initializeOuiUpdates()
@@ -70,6 +82,46 @@ class FlockYouApplication : Application(), Configuration.Provider {
         // Initialize dead man's switch if enabled
         applicationScope.launch {
             initializeDeadManSwitch()
+        }
+    }
+
+    /**
+     * Initialize OEM-specific background scanning behavior.
+     * For OEM builds, this ensures the scanning service starts automatically
+     * and runs continuously in the background.
+     */
+    private fun initializeOemBackground() {
+        // Set OEM defaults on first run
+        BootReceiver.initializeOemDefaults(this)
+
+        // For OEM builds, auto-start the scanning service
+        if (BuildConfig.IS_OEM_BUILD) {
+            Log.i(TAG, "OEM build detected - starting background scanning service")
+            startScanningService()
+        }
+    }
+
+    /**
+     * Start the scanning service as a foreground service.
+     */
+    private fun startScanningService() {
+        try {
+            val serviceIntent = Intent(this, ScanningService::class.java).apply {
+                action = "com.flockyou.START_SCANNING"
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ContextCompat.startForegroundService(this, serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+
+            // Mark service as enabled for restart mechanisms
+            BootReceiver.setServiceEnabled(this, true)
+
+            Log.i(TAG, "Scanning service start requested")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start scanning service", e)
         }
     }
 

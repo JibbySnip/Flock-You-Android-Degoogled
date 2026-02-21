@@ -23,13 +23,61 @@ import javax.inject.Singleton
  * Handles detection and analysis of cellular network anomalies that may indicate
  * IMSI catchers (StingRay), cell site simulators, or other cellular surveillance devices.
  *
- * Detection Methods:
+ * Detection Methods (Implemented - feasible on stock Android):
  * - CELL_ENCRYPTION_DOWNGRADE: 5G/4G to 2G downgrade (weak/no encryption)
  * - CELL_SUSPICIOUS_NETWORK: Invalid or test MCC-MNC codes
  * - CELL_TOWER_CHANGE: Unexpected cell tower changes while stationary
  * - CELL_RAPID_SWITCHING: Abnormal tower switching patterns
  * - CELL_SIGNAL_ANOMALY: Sudden signal strength changes
  * - CELL_LAC_TAC_ANOMALY: Location area code changes without cell change
+ *
+ * Pattern-to-AnomalyType Mapping:
+ * - ENCRYPTION_DOWNGRADE       -> AnomalyType.ENCRYPTION_DOWNGRADE
+ * - SUSPICIOUS_NETWORK_ID      -> AnomalyType.SUSPICIOUS_NETWORK
+ * - CELL_ID_CHANGE             -> AnomalyType.CELL_TOWER_CHANGE, STATIONARY_CELL_CHANGE
+ * - RAPID_CELL_SWITCHING       -> AnomalyType.RAPID_CELL_SWITCHING
+ * - SIGNAL_SPIKE               -> AnomalyType.SIGNAL_SPIKE
+ * - LAC_TAC_ANOMALY            -> AnomalyType.LAC_TAC_ANOMALY
+ * - UNKNOWN_CELL_TOWER         -> AnomalyType.UNKNOWN_CELL_FAMILIAR_AREA
+ * - ROAMING_ANOMALY            -> Not yet wired to any AnomalyType; roaming state
+ *                                 is tracked in CellularAnomalyAnalysis.isRoaming
+ *                                 but no anomaly is currently emitted for unexpected
+ *                                 roaming changes. Reserved for future implementation.
+ *
+ * INFEASIBLE DETECTIONS (not implemented, documented for reference):
+ *
+ * - SILENT_SMS: Detecting silent/Type 0 SMS requires intercepting the baseband modem's
+ *   SMS PDU processing. On stock Android, the Telephony framework does not expose
+ *   Type 0 SMS to applications -- they are handled entirely in the radio layer (RIL).
+ *   Root access and a modified RIL or baseband debug interface would be required.
+ *   The CellularAnomalyType.SILENT_SMS enum exists in ScannerInterfaces.kt for
+ *   potential future use with rooted/custom ROM builds but is NOT wired to any
+ *   detection pipeline on stock Android.
+ *
+ * - BASEBAND_ANOMALY: Baseband processor diagnostics (e.g., detecting unusual AT
+ *   commands, firmware anomalies, or radio layer manipulation) require direct access
+ *   to the baseband modem via /dev/smd or vendor-specific diagnostic interfaces
+ *   (e.g., Qualcomm DIAG/QXDM, Samsung Shannon). These interfaces are not exposed
+ *   to user-space applications on stock Android and require root + vendor-specific
+ *   tools. No detection code exists for this.
+ *
+ * - CELL_BROADCAST_DISABLED: Android 14 (API 34) moved Cell Broadcast handling into
+ *   a privileged system app (CellBroadcastReceiver) and removed the ability for
+ *   third-party apps to directly query cell broadcast channel configuration.
+ *   The CellularAnomalyType.CELL_BROADCAST_DISABLED enum exists in ScannerInterfaces.kt
+ *   but is NOT implemented. On Android 14+, detecting whether cell broadcasts have
+ *   been disabled by a fake base station would require MODIFY_CELL_BROADCASTS
+ *   permission (signature|privileged) or reading the system cell broadcast database
+ *   directly, neither of which is available to sideloaded apps.
+ *
+ * Rate Limiting:
+ * - Rate limiting is keyed by DetectionMethod, so different anomaly types are
+ *   independently throttled. However, STATIONARY_CELL_CHANGE, CELL_TOWER_CHANGE,
+ *   and UNKNOWN_CELL_FAMILIAR_AREA all map to DetectionMethod.CELL_TOWER_CHANGE,
+ *   so they share the same rate-limit window.
+ * - The minAnomalyIntervalMs (default 60s) applies uniformly across all build
+ *   variants (sideload/system/OEM). Privilege mode does not currently affect
+ *   cellular detection rate limits, only scan intervals.
  *
  * Primarily targets STINGRAY_IMSI device type detections.
  */
@@ -243,8 +291,20 @@ class CellularDetectionHandler @Inject constructor(
     }
 
     /**
-     * Tracks last detection time per method for rate limiting.
+     * Tracks last detection time per DetectionMethod for rate limiting.
      * Thread-safe: Uses ConcurrentHashMap for safe multi-threaded access.
+     *
+     * Rate limiting behavior:
+     * - Each DetectionMethod has its own independent rate-limit window.
+     * - Anomaly types that share the same DetectionMethod also share their rate limit.
+     *   Specifically, CELL_TOWER_CHANGE, STATIONARY_CELL_CHANGE, and
+     *   UNKNOWN_CELL_FAMILIAR_AREA all map to DetectionMethod.CELL_TOWER_CHANGE,
+     *   so only one tower-change-related detection can fire per minAnomalyIntervalMs
+     *   window (default 60s). This is intentional to prevent UI flooding from
+     *   frequent cell handoffs.
+     * - The rate limit interval (minAnomalyIntervalMs) is the same across all
+     *   build variants (sideload/system/OEM). Privilege mode only affects scan
+     *   intervals, not detection throttling.
      */
     private val lastDetectionTime = ConcurrentHashMap<DetectionMethod, Long>()
 
@@ -278,10 +338,15 @@ class CellularDetectionHandler @Inject constructor(
 
         val detectionMethod = mapAnomalyTypeToMethod(context.anomalyType)
 
-        // Check if this detection method is enabled
-        val pattern = mapMethodToPattern(detectionMethod)
+        // Check if this detection pattern is enabled.
+        // We map from anomaly type directly to pattern rather than going through
+        // DetectionMethod, because multiple anomaly types share the same DetectionMethod
+        // (e.g., UNKNOWN_CELL_FAMILIAR_AREA and CELL_TOWER_CHANGE both map to
+        // CELL_TOWER_CHANGE method) but should be controlled by different pattern settings
+        // (UNKNOWN_CELL_TOWER vs CELL_ID_CHANGE).
+        val pattern = mapAnomalyToPattern(context.anomalyType)
         if (pattern != null && pattern !in settings.enabledCellularPatterns) {
-            Log.d(TAG, "Detection method ${detectionMethod.name} is disabled, skipping")
+            Log.d(TAG, "Detection pattern ${pattern.name} for anomaly ${context.anomalyType.name} is disabled, skipping")
             return null
         }
 
@@ -811,13 +876,32 @@ class CellularDetectionHandler @Inject constructor(
 
     private fun buildRawDataString(context: CellularDetectionContext): String {
         return buildString {
+            appendLine("Anomaly: ${context.anomalyType.name}")
             appendLine("MCC-MNC: ${context.mcc}-${context.mnc}")
             appendLine("Cell ID: ${context.cellId}")
+            context.previousCellId?.let { appendLine("Previous Cell ID: $it") }
             appendLine("Network: ${context.networkType}")
+            context.previousNetworkType?.let { appendLine("Previous Network: $it") }
             appendLine("Signal: ${context.signalStrength} dBm")
+            context.previousSignalStrength?.let {
+                val delta = context.signalStrength - it
+                appendLine("Previous Signal: $it dBm (delta: ${if (delta >= 0) "+" else ""}$delta)")
+            }
             appendLine("Encryption: ${context.encryptionType.displayName}")
             appendLine("IMSI Score: ${context.imsiCatcherScore}%")
+            context.lac?.let { appendLine("LAC: $it") }
+            context.tac?.let { appendLine("TAC: $it") }
+            appendLine("Roaming: ${if (context.isRoaming) "Yes" else "No"}")
             context.movementType?.let { appendLine("Movement: ${it.displayName}") }
+            context.speedKmh?.let { appendLine("Speed: ${String.format("%.1f", it)} km/h") }
+            context.cellTrustScore?.let { appendLine("Cell Trust: $it%") }
+            context.cellSeenCount?.let { appendLine("Cell Seen Count: $it") }
+            context.encryptionDowngradeChain?.let {
+                if (it.size > 1) appendLine("Downgrade Chain: ${it.joinToString(" -> ")}")
+            }
+            if (context.contributingFactors.isNotEmpty()) {
+                appendLine("Contributing Factors: ${context.contributingFactors.joinToString(", ")}")
+            }
         }
     }
 
@@ -849,6 +933,11 @@ class CellularDetectionHandler @Inject constructor(
         }
     }
 
+    /**
+     * Map from DetectionMethod to CellularPattern for legacy compatibility.
+     * Prefer [mapAnomalyToPattern] for anomaly-to-pattern mapping, as it handles
+     * the many-to-one relationship between anomaly types and detection methods correctly.
+     */
     private fun mapMethodToPattern(method: DetectionMethod): CellularPattern? {
         return when (method) {
             DetectionMethod.CELL_ENCRYPTION_DOWNGRADE -> CellularPattern.ENCRYPTION_DOWNGRADE
@@ -858,6 +947,30 @@ class CellularDetectionHandler @Inject constructor(
             DetectionMethod.CELL_SIGNAL_ANOMALY -> CellularPattern.SIGNAL_SPIKE
             DetectionMethod.CELL_LAC_TAC_ANOMALY -> CellularPattern.LAC_TAC_ANOMALY
             else -> null
+        }
+    }
+
+    /**
+     * Map directly from AnomalyType to CellularPattern for settings checks.
+     *
+     * This is more accurate than going through DetectionMethod because some anomaly types
+     * share a DetectionMethod but are controlled by different pattern settings.
+     * For example:
+     * - UNKNOWN_CELL_FAMILIAR_AREA should check UNKNOWN_CELL_TOWER (enabled by default)
+     * - CELL_TOWER_CHANGE should check CELL_ID_CHANGE (disabled by default)
+     * Both map to DetectionMethod.CELL_TOWER_CHANGE, so using the method-based mapping
+     * would incorrectly gate UNKNOWN_CELL_FAMILIAR_AREA behind the CELL_ID_CHANGE toggle.
+     */
+    private fun mapAnomalyToPattern(type: CellularMonitor.AnomalyType): CellularPattern? {
+        return when (type) {
+            CellularMonitor.AnomalyType.ENCRYPTION_DOWNGRADE -> CellularPattern.ENCRYPTION_DOWNGRADE
+            CellularMonitor.AnomalyType.SUSPICIOUS_NETWORK -> CellularPattern.SUSPICIOUS_NETWORK_ID
+            CellularMonitor.AnomalyType.CELL_TOWER_CHANGE -> CellularPattern.CELL_ID_CHANGE
+            CellularMonitor.AnomalyType.STATIONARY_CELL_CHANGE -> CellularPattern.CELL_ID_CHANGE
+            CellularMonitor.AnomalyType.RAPID_CELL_SWITCHING -> CellularPattern.RAPID_CELL_SWITCHING
+            CellularMonitor.AnomalyType.SIGNAL_SPIKE -> CellularPattern.SIGNAL_SPIKE
+            CellularMonitor.AnomalyType.LAC_TAC_ANOMALY -> CellularPattern.LAC_TAC_ANOMALY
+            CellularMonitor.AnomalyType.UNKNOWN_CELL_FAMILIAR_AREA -> CellularPattern.UNKNOWN_CELL_TOWER
         }
     }
 
