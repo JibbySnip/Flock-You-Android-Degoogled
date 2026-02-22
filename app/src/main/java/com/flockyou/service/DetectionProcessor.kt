@@ -371,6 +371,28 @@ internal fun ScanningService.sendCellularAnomalyBroadcast(anomaly: CellularMonit
 }
 
 /**
+ * Send a broadcast for Shannon SDM anomaly events.
+ * Reuses the broadcastOnCellularAnomaly settings gate since SDM anomalies
+ * are cellular-layer detections.
+ */
+internal fun ScanningService.broadcastShannonAnomaly(anomaly: com.flockyou.shannon.ShannonAnomaly) {
+    val settings = currentBroadcastSettings
+    if (!settings.enabled || !settings.broadcastOnCellularAnomaly) return
+
+    val intent = Intent("com.flockyou.SHANNON_SDM_ANOMALY").apply {
+        putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_TYPE, anomaly.type.name)
+        putExtra(com.flockyou.data.BroadcastSettings.EXTRA_ANOMALY_DESCRIPTION, anomaly.description)
+        putExtra(com.flockyou.data.BroadcastSettings.EXTRA_THREAT_LEVEL, anomaly.severity.name)
+        putExtra(com.flockyou.data.BroadcastSettings.EXTRA_TIMESTAMP, anomaly.timestamp)
+        putExtra("confidence", anomaly.confidence)
+        setPackage(null)
+    }
+
+    sendBroadcast(intent)
+    Log.d(TAG, "Broadcast sent: com.flockyou.SHANNON_SDM_ANOMALY (${anomaly.type.name})")
+}
+
+/**
  * Send a broadcast for satellite anomaly events
  */
 internal fun ScanningService.sendSatelliteAnomalyBroadcast(anomaly: com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly) {

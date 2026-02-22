@@ -312,6 +312,12 @@ class ScanningService : Service() {
     // GNSS satellite monitor
     internal var gnssSatelliteMonitor: com.flockyou.monitoring.GnssSatelliteMonitor? = null
 
+    // Shannon SDM diagnostic monitor (OEM only)
+    internal var shannonDiagMonitor: com.flockyou.shannon.ShannonDiagMonitor? = null
+    internal var shannonStatusJob: Job? = null
+    internal var shannonAnomalyJob: Job? = null
+    internal val processedShannonAnomalyIds = mutableSetOf<String>()
+
     // Health check job for monitoring detector health
     private var healthCheckJob: Job? = null
 
@@ -570,6 +576,13 @@ class ScanningService : Service() {
         // Initialize GNSS Satellite Monitor with error callback
         gnssSatelliteMonitor = com.flockyou.monitoring.GnssSatelliteMonitor(applicationContext, detectorCallbackImpl)
 
+        // Initialize Shannon SDM Diagnostic Monitor (OEM only)
+        if (com.flockyou.config.OemFeatureFlags.SHANNON_DIAG_ENABLED) {
+            shannonDiagMonitor = com.flockyou.shannon.ShannonDiagMonitor(applicationContext) { name, error ->
+                detectorCallbackImpl.onError(name, error, true)
+            }
+        }
+
         // Initialize detector health data so it's available immediately when clients connect
         // This ensures Service Health screen can display data even before scanning starts
         initializeDetectorHealth()
@@ -635,6 +648,8 @@ class ScanningService : Service() {
         ultrasonicDetector = null
         gnssSatelliteMonitor?.stopMonitoring()
         gnssSatelliteMonitor = null
+        shannonDiagMonitor?.destroy()
+        shannonDiagMonitor = null
 
         // Cancel watchdog if service is intentionally stopped
         // Only schedule restart if service should still be running
@@ -906,6 +921,9 @@ class ScanningService : Service() {
         if (config.enableCellular) {
             startCellularMonitoring()
         }
+
+        // Start Shannon SDM diagnostic monitoring (OEM only, after cellular)
+        startShannonDiagMonitoring()
 
         // Start satellite monitoring
         startSatelliteMonitoring()

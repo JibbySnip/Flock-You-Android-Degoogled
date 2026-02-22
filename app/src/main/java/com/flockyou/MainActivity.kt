@@ -132,13 +132,36 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    private val backgroundLocationLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        // Whether granted or not, proceed - background location is important but not blocking
+        // Re-check all permissions including background location
+        checkPermissions()
+        if (permissionsGranted) {
+            checkBatteryOptimization()
+            if (!prefs.getBoolean(PREF_GETTING_STARTED_SHOWN, false)) {
+                showGettingStartedDialog = true
+            }
+        }
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        permissionsGranted = permissions.values.all { it }
+        val foregroundGranted = permissions.values.all { it }
+        if (foregroundGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android 10+ requires background location to be requested separately
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                return@registerForActivityResult
+            }
+        }
+        permissionsGranted = foregroundGranted
         if (permissionsGranted) {
             checkBatteryOptimization()
-            // Show Getting Started dialog if not shown before
             if (!prefs.getBoolean(PREF_GETTING_STARTED_SHOWN, false)) {
                 showGettingStartedDialog = true
             }
@@ -277,9 +300,15 @@ class MainActivity : FragmentActivity() {
     }
     
     private fun checkPermissions() {
-        permissionsGranted = requiredPermissions.all { permission ->
+        val foregroundGranted = requiredPermissions.all { permission ->
             ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
         }
+        val backgroundLocationGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true // Pre-Q: foreground location permission covers background use
+        }
+        permissionsGranted = foregroundGranted && backgroundLocationGranted
     }
     
     private fun requestPermissions() {

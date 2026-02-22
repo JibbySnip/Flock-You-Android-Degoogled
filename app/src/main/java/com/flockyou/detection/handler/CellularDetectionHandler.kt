@@ -778,6 +778,95 @@ class CellularDetectionHandler @Inject constructor(
     }
 
     /**
+     * Convert a Shannon SDM anomaly to a Detection.
+     * Shannon anomalies come from modem-level NAS/RRC signaling and are
+     * more definitive than API-based heuristics.
+     *
+     * Returns null if the corresponding SDM pattern is disabled in settings.
+     */
+    suspend fun convertShannonAnomalyToDetection(
+        anomaly: com.flockyou.shannon.ShannonAnomaly,
+        latitude: Double?,
+        longitude: Double?
+    ): Detection? {
+        val settings = detectionSettingsRepository.settings.first()
+
+        // Map ShannonAnomalyType to CellularPattern for settings check
+        val pattern = when (anomaly.type) {
+            com.flockyou.shannon.ShannonAnomalyType.NULL_CIPHER -> CellularPattern.SDM_NULL_CIPHER
+            com.flockyou.shannon.ShannonAnomalyType.IMSI_PAGING -> CellularPattern.SDM_IMSI_PAGING
+            com.flockyou.shannon.ShannonAnomalyType.SILENT_SMS -> CellularPattern.SDM_SILENT_SMS
+            com.flockyou.shannon.ShannonAnomalyType.FORCED_2G -> CellularPattern.SDM_FORCED_2G
+            com.flockyou.shannon.ShannonAnomalyType.AUTH_ANOMALY -> CellularPattern.SDM_AUTH_ANOMALY
+        }
+
+        // Check if pattern is enabled
+        if (pattern !in settings.enabledCellularPatterns) {
+            Log.d(TAG, "SDM pattern ${pattern.name} is disabled, skipping")
+            return null
+        }
+
+        // Map to DetectionMethod
+        val method = when (anomaly.type) {
+            com.flockyou.shannon.ShannonAnomalyType.NULL_CIPHER -> DetectionMethod.SDM_NULL_CIPHER_DETECTED
+            com.flockyou.shannon.ShannonAnomalyType.IMSI_PAGING -> DetectionMethod.SDM_IMSI_PAGING_DETECTED
+            com.flockyou.shannon.ShannonAnomalyType.SILENT_SMS -> DetectionMethod.SDM_SILENT_SMS_DETECTED
+            com.flockyou.shannon.ShannonAnomalyType.FORCED_2G -> DetectionMethod.SDM_FORCED_2G_DETECTED
+            com.flockyou.shannon.ShannonAnomalyType.AUTH_ANOMALY -> DetectionMethod.SDM_AUTHENTICATION_ANOMALY
+        }
+
+        // Calculate threat score: SDM detections have inherently high confidence
+        val threatScore = when (anomaly.severity) {
+            com.flockyou.shannon.ShannonSeverity.CRITICAL -> (95 * anomaly.confidence).toInt()
+            com.flockyou.shannon.ShannonSeverity.HIGH -> (85 * anomaly.confidence).toInt()
+            com.flockyou.shannon.ShannonSeverity.MEDIUM -> (65 * anomaly.confidence).toInt()
+            com.flockyou.shannon.ShannonSeverity.LOW -> (45 * anomaly.confidence).toInt()
+        }.coerceIn(0, 100)
+
+        val threatLevel = com.flockyou.data.model.scoreToThreatLevel(threatScore)
+
+        return Detection(
+            id = UUID.randomUUID().toString(),
+            timestamp = anomaly.timestamp,
+            protocol = DetectionProtocol.CELLULAR,
+            detectionMethod = method,
+            deviceType = DeviceType.STINGRAY_IMSI,
+            deviceName = "\u26a0\ufe0f SDM: ${anomaly.type.displayName}",
+            macAddress = null,
+            ssid = null,
+            rssi = -50, // Not applicable for modem-level detection
+            signalStrength = rssiToSignalStrength(-50),
+            latitude = latitude,
+            longitude = longitude,
+            threatLevel = threatLevel,
+            threatScore = threatScore,
+            manufacturer = "Shannon Modem SDM",
+            firmwareVersion = null,
+            serviceUuids = null,
+            matchedPatterns = "SDM:${anomaly.type.name}",
+            rawData = buildShannonRawData(anomaly),
+            isActive = true,
+            seenCount = 1,
+            lastSeenTimestamp = anomaly.timestamp,
+            detectionSource = com.flockyou.data.model.DetectionSource.SHANNON_SDM
+        )
+    }
+
+    private fun buildShannonRawData(anomaly: com.flockyou.shannon.ShannonAnomaly): String {
+        return buildString {
+            appendLine("Source: Shannon Modem Diagnostic Interface (SDM)")
+            appendLine("Anomaly: ${anomaly.type.displayName}")
+            appendLine("Severity: ${anomaly.severity.displayName}")
+            appendLine("Confidence: ${String.format("%.0f", anomaly.confidence * 100)}%")
+            appendLine("Description: ${anomaly.description}")
+            if (anomaly.details.isNotEmpty()) {
+                appendLine("Details:")
+                anomaly.details.forEach { (k, v) -> appendLine("  $k: $v") }
+            }
+        }
+    }
+
+    /**
      * Calculate IMSI catcher likelihood score (0-100).
      */
     fun calculateImsiCatcherScore(context: CellularDetectionContext): Int {

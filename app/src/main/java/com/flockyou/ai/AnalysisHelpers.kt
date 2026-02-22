@@ -188,6 +188,8 @@ internal fun selectPromptForDetection(
                 PromptTemplates.buildBleEnrichedPrompt(detection, enrichedData.analysis)
             is EnrichedDetectorData.WifiSsidMatch ->
                 PromptTemplates.buildWifiSsidEnrichedPrompt(detection, enrichedData)
+            is EnrichedDetectorData.Shannon ->
+                PromptTemplates.buildChainOfThoughtPrompt(detection, enrichedData)
         }
     }
 

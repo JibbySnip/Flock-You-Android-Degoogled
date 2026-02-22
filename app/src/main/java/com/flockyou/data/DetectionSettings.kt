@@ -25,7 +25,13 @@ enum class CellularPattern(val displayName: String, val description: String, val
     LAC_TAC_ANOMALY("LAC/TAC Anomaly", "Detects location area changes without cell change", true),
     UNKNOWN_CELL_TOWER("Unknown Cell Tower", "Alerts on connection to untrusted cell towers", true),
     CELL_ID_CHANGE("Cell ID Change", "Logs all cell tower changes", false),
-    ROAMING_ANOMALY("Roaming Anomaly", "Detects unexpected roaming state changes", true)
+    ROAMING_ANOMALY("Roaming Anomaly", "Detects unexpected roaming state changes", true),
+    // Shannon SDM modem-level patterns (OEM only, requires /dev/umts_dm0 access)
+    SDM_NULL_CIPHER("SDM Null Cipher", "Definitive: modem-level null cipher detection", true),
+    SDM_IMSI_PAGING("SDM IMSI Paging", "Modem-level IMSI identity request detection", true),
+    SDM_SILENT_SMS("SDM Silent SMS", "Modem-level silent SMS (Type 0) detection", true),
+    SDM_FORCED_2G("SDM Forced 2G", "Modem-level forced 2G redirect detection", true),
+    SDM_AUTH_ANOMALY("SDM Auth Anomaly", "Modem-level authentication parameter anomaly", true)
 }
 
 /**

@@ -46,6 +46,7 @@ import com.flockyou.BuildConfig
  * - AI_ENABLED: On-device AI analysis features
  * - TOR_ENABLED: Tor network integration for anonymous updates
  * - MAP_ENABLED: Map display and geolocation features
+ * - SHANNON_DIAG_ENABLED: Shannon modem diagnostic capture (OEM only)
  */
 object OemFeatureFlags {
 
@@ -106,6 +107,15 @@ object OemFeatureFlags {
         get() = BuildConfig.FEATURE_MAP_ENABLED
 
     /**
+     * Shannon modem diagnostic capture.
+     * When enabled, allows reading raw NAS/RRC signaling from Samsung Shannon modems
+     * via /dev/umts_dm0 for definitive IMSI catcher detection.
+     * Requires OEM build with SELinux policy granting access to the diagnostic device node.
+     */
+    val SHANNON_DIAG_ENABLED: Boolean
+        get() = BuildConfig.FEATURE_SHANNON_DIAG_ENABLED
+
+    /**
      * Returns a list of all enabled features for diagnostic purposes.
      */
     fun getEnabledFeatures(): List<String> = buildList {
@@ -116,6 +126,7 @@ object OemFeatureFlags {
         if (AI_ENABLED) add("AI")
         if (TOR_ENABLED) add("Tor")
         if (MAP_ENABLED) add("Map")
+        if (SHANNON_DIAG_ENABLED) add("Shannon Diagnostics")
     }
 
     /**
@@ -129,6 +140,7 @@ object OemFeatureFlags {
         if (!AI_ENABLED) add("AI")
         if (!TOR_ENABLED) add("Tor")
         if (!MAP_ENABLED) add("Map")
+        if (!SHANNON_DIAG_ENABLED) add("Shannon Diagnostics")
     }
 
     /**
@@ -141,7 +153,8 @@ object OemFeatureFlags {
         NUKE_ENABLED &&
         AI_ENABLED &&
         TOR_ENABLED &&
-        MAP_ENABLED
+        MAP_ENABLED &&
+        SHANNON_DIAG_ENABLED
 
     /**
      * Returns a debug string showing all feature states.
@@ -155,5 +168,6 @@ object OemFeatureFlags {
         appendLine("  AI: $AI_ENABLED")
         appendLine("  Tor: $TOR_ENABLED")
         appendLine("  Map: $MAP_ENABLED")
+        appendLine("  Shannon Diagnostics: $SHANNON_DIAG_ENABLED")
     }
 }

@@ -98,6 +98,12 @@ enum class DetectionMethod(val displayName: String, val description: String) {
     CELL_RAPID_SWITCHING("Rapid Cell Switching", "Phone switching towers abnormally fast"),
     CELL_SIGNAL_ANOMALY("Signal Anomaly", "Sudden unexplained signal strength change"),
     CELL_LAC_TAC_ANOMALY("Location Area Anomaly", "LAC/TAC changed unexpectedly"),
+    // Shannon SDM modem-level detection methods (OEM only)
+    SDM_NULL_CIPHER_DETECTED("SDM Null Cipher", "Modem-level: null cipher negotiated (definitive IMSI catcher)"),
+    SDM_IMSI_PAGING_DETECTED("SDM IMSI Paging", "Modem-level: network requested IMSI identity"),
+    SDM_SILENT_SMS_DETECTED("SDM Silent SMS", "Modem-level: invisible Type 0 SMS for location tracking"),
+    SDM_FORCED_2G_DETECTED("SDM Forced 2G", "Modem-level: forced redirect to 2G for interception"),
+    SDM_AUTHENTICATION_ANOMALY("SDM Auth Anomaly", "Modem-level: malformed authentication parameters"),
     // Satellite anomaly detection methods
     SAT_UNEXPECTED_CONNECTION("Unexpected Satellite", "Satellite connection when terrestrial available"),
     SAT_FORCED_HANDOFF("Forced Satellite Handoff", "Rapid or suspicious handoff to satellite"),
@@ -293,6 +299,7 @@ enum class DetectionSource(val displayName: String) {
     CELLULAR("Cellular Network"),
     GNSS("GNSS/Satellite"),
     AUDIO("Audio Analysis"),
+    SHANNON_SDM("Shannon Modem SDM"),
     UNKNOWN("Unknown Source")
 }
 

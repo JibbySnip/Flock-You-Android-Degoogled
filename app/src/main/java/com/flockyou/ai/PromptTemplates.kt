@@ -542,6 +542,47 @@ Pattern Match: ${data.matchedPatternDescription}
 Pattern Manufacturer: ${data.patternManufacturer ?: "Unknown"}
 Nearby AP Count: ${data.nearbyApCount} (environment density)"""
             }
+            is EnrichedDetectorData.Shannon -> {
+                val a = data.anomaly
+                """
+=== ENRICHED SHANNON MODEM SDM DATA ===
+SOURCE: Samsung Shannon modem diagnostic interface (/dev/umts_dm0)
+NOTE: This is RAW NAS/RRC signaling from the modem, NOT API-level inference.
+The modem observes the actual protocol messages between device and network.
+
+Anomaly Type: ${a.type.displayName}
+Severity: ${a.severity.displayName}
+Confidence: ${String.format("%.0f", a.confidence * 100)}%
+
+${when (a.type) {
+    com.flockyou.shannon.ShannonAnomalyType.NULL_CIPHER ->
+        "DEFINITIVE IMSI CATCHER INDICATOR: The network negotiated a null cipher " +
+        "(${a.details["cipher"] ?: "unknown"}), meaning all voice and data traffic is transmitted " +
+        "in cleartext. Legitimate networks ALWAYS use encryption (EEA1/2/3 for LTE, " +
+        "NEA1/2/3 for 5G). Null cipher is only used by cell site simulators."
+    com.flockyou.shannon.ShannonAnomalyType.IMSI_PAGING ->
+        "STRONG IMSI CATCHER INDICATOR: The network sent an Identity Request asking for " +
+        "the device's IMSI. Legitimate networks assign a TMSI (temporary ID) after initial " +
+        "registration and use that for paging. Requesting the permanent IMSI over the air " +
+        "is characteristic of IMSI catchers harvesting subscriber identities."
+    com.flockyou.shannon.ShannonAnomalyType.SILENT_SMS ->
+        "LOCATION TRACKING INDICATOR: A Type 0 (silent) SMS was received. This SMS is " +
+        "invisible to the user -- no notification, no inbox entry. It forces the device to " +
+        "respond, confirming its presence on the network and revealing its cell location. " +
+        "Used by law enforcement for target confirmation."
+    com.flockyou.shannon.ShannonAnomalyType.FORCED_2G ->
+        "DOWNGRADE ATTACK: The network sent an RRC redirect forcing the device from " +
+        "${a.details["sourceRat"] ?: "LTE/5G"} to 2G (GSM). 2G has weaker encryption (A5/1, easily " +
+        "broken) or no encryption (A5/0). This is a common IMSI catcher tactic to enable " +
+        "traffic interception."
+    com.flockyou.shannon.ShannonAnomalyType.AUTH_ANOMALY ->
+        "AUTHENTICATION ANOMALY: The network sent an Authentication Request with " +
+        "suspicious parameters (RAND valid: ${a.details["randValid"]}, AUTN valid: " +
+        "${a.details["autnValid"]}). Fake base stations sometimes use malformed or " +
+        "all-zero authentication vectors."
+}}
+${a.details.entries.joinToString("\n") { "  ${it.key}: ${it.value}" }}"""
+            }
         }
     }
 
@@ -884,6 +925,16 @@ sealed class EnrichedDetectorData {
     ) : EnrichedDetectorData()
 
     data class Ble(val analysis: BleAnalysisData) : EnrichedDetectorData()
+
+    /**
+     * Enriched data from Shannon modem SDM diagnostic capture.
+     *
+     * Unlike API-based cellular anomaly detection, Shannon SDM data is captured
+     * directly from the modem's NAS/RRC signaling layer. This means the detection
+     * is based on the actual protocol messages exchanged between the device and
+     * the network, not inferred from high-level API state changes.
+     */
+    data class Shannon(val anomaly: com.flockyou.shannon.ShannonAnomaly) : EnrichedDetectorData()
 
     /**
      * Enriched data for standard WiFi SSID/MAC pattern match detections.

@@ -861,6 +861,100 @@ internal fun ScanningService.hasAudioPermissions(): Boolean {
     ) == PackageManager.PERMISSION_GRANTED
 }
 
+// ==================== Shannon SDM Diagnostic Monitoring (OEM Only) ====================
+
+internal fun ScanningService.startShannonDiagMonitoring() {
+    // Guard: feature flag + runtime capability
+    if (!com.flockyou.config.OemFeatureFlags.SHANNON_DIAG_ENABLED) {
+        return
+    }
+
+    val capability = com.flockyou.shannon.ShannonCapabilityDetector.detect()
+    if (capability != com.flockyou.shannon.ShannonCapabilityDetector.ShannonStatus.AVAILABLE) {
+        ScanningServiceState.shannonDiagStatus.value = SubsystemStatus.Error(
+            -1, "Shannon: ${capability.displayName}"
+        )
+        Log.d(TAG, "Shannon diagnostics not available: ${capability.displayName}")
+        return
+    }
+
+    shannonDiagMonitor?.startMonitoring()
+    ScanningServiceState.shannonDiagStatus.value = SubsystemStatus.Active
+    broadcastSubsystemStatus()
+    Log.i(TAG, "Shannon SDM diagnostic monitoring started")
+
+    // Collect Shannon status updates
+    shannonStatusJob = serviceScope.launch {
+        shannonDiagMonitor?.status?.collect { status ->
+            ScanningServiceState.shannonDiagStatus.value = when (status) {
+                com.flockyou.shannon.ShannonDiagStatus.ACTIVE -> SubsystemStatus.Active
+                com.flockyou.shannon.ShannonDiagStatus.STARTING -> SubsystemStatus.Active
+                com.flockyou.shannon.ShannonDiagStatus.RECONNECTING -> SubsystemStatus.Active
+                com.flockyou.shannon.ShannonDiagStatus.IDLE -> SubsystemStatus.Idle
+                com.flockyou.shannon.ShannonDiagStatus.UNAVAILABLE -> SubsystemStatus.Error(-1, "Unavailable")
+                com.flockyou.shannon.ShannonDiagStatus.ERROR -> SubsystemStatus.Error(-2, "Error")
+            }
+            broadcastSubsystemStatus()
+        }
+    }
+
+    // Collect Shannon anomalies and convert to detections
+    shannonAnomalyJob = serviceScope.launch {
+        shannonDiagMonitor?.anomalies?.collect { anomalies ->
+            ScanningServiceState.shannonAnomalies.value = anomalies
+
+            for (anomaly in anomalies) {
+                // Skip if already processed
+                if (anomaly.id in processedShannonAnomalyIds) continue
+
+                // Send broadcast for automation apps
+                broadcastShannonAnomaly(anomaly)
+
+                // Convert to detection via handler
+                val detection = cellularDetectionHandler.convertShannonAnomalyToDetection(
+                    anomaly = anomaly,
+                    latitude = currentLocation?.latitude,
+                    longitude = currentLocation?.longitude
+                )
+                detection?.let { det ->
+                    try {
+                        insertDetectionWithAnalysis(det)
+                        processedShannonAnomalyIds.add(anomaly.id)
+
+                        // Alert for CRITICAL/HIGH severity
+                        if (det.threatLevel == com.flockyou.data.model.ThreatLevel.CRITICAL ||
+                            det.threatLevel == com.flockyou.data.model.ThreatLevel.HIGH) {
+                            alertUser(det)
+                        }
+
+                        ScanningServiceState.lastDetection.value = det
+                        ScanningServiceState.detectionCount.value = repository.getTotalDetectionCount()
+                        broadcastLastDetection()
+                        broadcastStateToClients()
+                        broadcastDetectionRefresh()
+
+                        if (BuildConfig.DEBUG) {
+                            Log.w(TAG, "SHANNON SDM ANOMALY: ${anomaly.type.displayName} - ${anomaly.description}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error saving Shannon detection: ${e.message}", e)
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal fun ScanningService.stopShannonDiagMonitoring() {
+    shannonStatusJob?.cancel()
+    shannonStatusJob = null
+    shannonAnomalyJob?.cancel()
+    shannonAnomalyJob = null
+    shannonDiagMonitor?.stopMonitoring()
+    ScanningServiceState.shannonDiagStatus.value = SubsystemStatus.Idle
+    Log.d(TAG, "Shannon SDM diagnostic monitoring stopped")
+}
+
 internal fun ScanningService.hasLocationPermissions(): Boolean {
     return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 }

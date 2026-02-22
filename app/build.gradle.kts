@@ -28,6 +28,7 @@ val oemFeatureNukeEnabled = getOemFeatureFlag("OEM_FEATURE_NUKE_ENABLED")
 val oemFeatureAiEnabled = getOemFeatureFlag("OEM_FEATURE_AI_ENABLED")
 val oemFeatureTorEnabled = getOemFeatureFlag("OEM_FEATURE_TOR_ENABLED")
 val oemFeatureMapEnabled = getOemFeatureFlag("OEM_FEATURE_MAP_ENABLED")
+val oemFeatureShannonDiagEnabled = getOemFeatureFlag("OEM_FEATURE_SHANNON_DIAG_ENABLED")
 
 android {
     namespace = "com.flockyou"
@@ -117,6 +118,7 @@ android {
             buildConfigField("boolean", "FEATURE_AI_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_TOR_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_MAP_ENABLED", "true")
+            buildConfigField("boolean", "FEATURE_SHANNON_DIAG_ENABLED", "false")
 
             // Standard manifest - no special OEM configurations
             manifestPlaceholders["appLabel"] = "@string/app_name"
@@ -140,6 +142,7 @@ android {
             buildConfigField("boolean", "FEATURE_AI_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_TOR_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_MAP_ENABLED", "true")
+            buildConfigField("boolean", "FEATURE_SHANNON_DIAG_ENABLED", "false")
 
             // System app label suffix for identification
             manifestPlaceholders["appLabel"] = "@string/app_name_system"
@@ -169,6 +172,7 @@ android {
             buildConfigField("boolean", "FEATURE_AI_ENABLED", "$oemFeatureAiEnabled")
             buildConfigField("boolean", "FEATURE_TOR_ENABLED", "$oemFeatureTorEnabled")
             buildConfigField("boolean", "FEATURE_MAP_ENABLED", "$oemFeatureMapEnabled")
+            buildConfigField("boolean", "FEATURE_SHANNON_DIAG_ENABLED", "$oemFeatureShannonDiagEnabled")
 
             // OEM app label suffix
             manifestPlaceholders["appLabel"] = "@string/app_name_oem"

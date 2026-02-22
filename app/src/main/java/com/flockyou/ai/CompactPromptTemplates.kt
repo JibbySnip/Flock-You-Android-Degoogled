@@ -474,6 +474,10 @@ JSON:"""
             is EnrichedDetectorData.RfEnvironment -> {
                 "RF:type=${data.anomalyType},score=${data.rfThreatScore},nets=${data.totalNetworks},hidden=${data.hiddenNetworkCount},fp=${String.format("%.0f", data.falsePositiveLikelihood)}%"
             }
+            is EnrichedDetectorData.Shannon -> {
+                val a = data.anomaly
+                "SDM:type=${a.type.name},sev=${a.severity.name},conf=${String.format("%.0f", a.confidence * 100)}%"
+            }
         }
     }
 

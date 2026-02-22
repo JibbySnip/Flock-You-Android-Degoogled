@@ -33,7 +33,10 @@ enum class ProtectionPreset(
         ESSENTIAL -> setOf(
             CellularPattern.ENCRYPTION_DOWNGRADE,  // Critical: StingRay/IMSI catcher indicator
             CellularPattern.SUSPICIOUS_NETWORK_ID,  // Critical: Fake cell tower detection
-            CellularPattern.UNKNOWN_CELL_TOWER      // Critical: Unknown tower detection
+            CellularPattern.UNKNOWN_CELL_TOWER,     // Critical: Unknown tower detection
+            CellularPattern.SDM_NULL_CIPHER,         // Definitive: Modem-level null cipher
+            CellularPattern.SDM_IMSI_PAGING,         // Critical: Modem-level IMSI request
+            CellularPattern.SDM_SILENT_SMS           // Critical: Modem-level silent SMS
         )
         BALANCED -> CellularPattern.values().filter { it.defaultEnabled }.toSet()
         PARANOID -> CellularPattern.values().toSet()

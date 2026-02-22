@@ -1,0 +1,34 @@
+# SELinux policy for Flock-You Shannon modem diagnostic access
+#
+# This policy grants the platform-signed Flock-You app read access to
+# the Samsung Shannon modem diagnostic interface at /dev/umts_dm0.
+#
+# PREREQUISITES:
+# - Flock-You must be signed with the platform certificate
+# - Flock-You must be installed as a system/priv-app
+# - This policy must be included in the device's sepolicy build
+#
+# INSTALLATION:
+# Copy this file to your AOSP tree:
+#   device/<vendor>/<device>/sepolicy/flockyou_shannon.te
+#
+# Add to your device's BoardConfig.mk:
+#   BOARD_SEPOLICY_DIRS += device/<vendor>/<device>/sepolicy
+#
+# Or for newer builds using sepolicy_dirs:
+#   BOARD_VENDOR_SEPOLICY_DIRS += device/<vendor>/<device>/sepolicy
+
+# Define the device node type (may already exist in your device tree)
+# If umts_dm0_device is already defined, remove this line.
+type umts_dm0_device, dev_type, mlstrustedobject;
+
+# Label the device node (add to file_contexts):
+# /dev/umts_dm0    u:object_r:umts_dm0_device:s0
+
+# Grant platform_app read access to the Shannon diagnostic interface
+# This allows Flock-You (platform-signed) to read raw SDM frames
+allow platform_app umts_dm0_device:chr_file { open read getattr };
+
+# If using a custom app domain instead of platform_app:
+# type flockyou_app, domain;
+# allow flockyou_app umts_dm0_device:chr_file { open read getattr };

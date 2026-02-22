@@ -61,7 +61,6 @@ data class DetectionMethodInfo(
  * Main permission setup wizard composable
  * Only shows pages for permission categories that have missing permissions.
  */
-@Suppress("UNUSED_PARAMETER") // onRequestBackgroundLocation reserved for separate background location flow
 @Composable
 fun PermissionSetupWizard(
     onRequestPermissions: () -> Unit,
@@ -576,7 +575,8 @@ private fun FinalPage(
         Spacer(modifier = Modifier.height(16.dp))
 
         Text(
-            text = "Grant the permissions to start detecting surveillance devices around you.",
+            text = "Grant the permissions to start detecting surveillance devices around you. " +
+                "You will be asked to allow location access \"All the time\" so scanning works in the background.",
             style = MaterialTheme.typography.bodyLarge,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant

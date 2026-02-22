@@ -83,6 +83,10 @@ object ScanningServiceState {
     val ultrasonicEvents = MutableStateFlow<List<UltrasonicDetector.UltrasonicEvent>>(emptyList())
     val ultrasonicBeacons = MutableStateFlow<List<UltrasonicDetector.BeaconDetection>>(emptyList())
 
+    // Shannon SDM diagnostic data (OEM only)
+    val shannonDiagStatus = MutableStateFlow<SubsystemStatus>(SubsystemStatus.Idle)
+    val shannonAnomalies = MutableStateFlow<List<com.flockyou.shannon.ShannonAnomaly>>(emptyList())
+
     // GNSS satellite monitoring data
     val gnssStatus = MutableStateFlow<com.flockyou.monitoring.GnssSatelliteMonitor.GnssEnvironmentStatus?>(null)
     val gnssSatellites = MutableStateFlow<List<com.flockyou.monitoring.GnssSatelliteMonitor.SatelliteInfo>>(emptyList())
