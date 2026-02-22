@@ -38,6 +38,7 @@ class MediaPipeLlmClient @Inject constructor(
         private const val INIT_TIMEOUT_MS = 30_000L // 30 second timeout for initialization
         private const val PREFS_NAME = "mediapipe_llm_prefs"
         private const val KEY_GPU_FAILED = "gpu_backend_failed"
+        private const val KEY_GPU_INIT_IN_PROGRESS = "gpu_init_in_progress"
         private const val KEY_INFERENCE_IN_PROGRESS = "inference_in_progress"
         private const val KEY_INFERENCE_CRASHED = "inference_crashed"
         private const val KEY_CRASH_COUNT = "inference_crash_count"
@@ -112,6 +113,16 @@ class MediaPipeLlmClient @Inject constructor(
      * Called on initialization to detect and prevent repeated crashes.
      */
     private fun checkAndHandlePreviousCrash(): Boolean {
+        // Check for GPU init native crash - if flag is still set, the process died during GPU init
+        val gpuInitWasInProgress = prefs.getBoolean(KEY_GPU_INIT_IN_PROGRESS, false)
+        if (gpuInitWasInProgress) {
+            prefs.edit()
+                .putBoolean(KEY_GPU_INIT_IN_PROGRESS, false)
+                .putBoolean(KEY_GPU_FAILED, true)
+                .commit()
+            Log.e(TAG, "Detected native crash during GPU initialization! GPU permanently disabled.")
+        }
+
         val wasInProgress = prefs.getBoolean(KEY_INFERENCE_IN_PROGRESS, false)
         if (wasInProgress) {
             // App crashed during inference
@@ -167,7 +178,10 @@ class MediaPipeLlmClient @Inject constructor(
      * Reset GPU failure flag (call this if user wants to retry GPU)
      */
     fun resetGpuFailure() {
-        prefs.edit().putBoolean(KEY_GPU_FAILED, false).apply()
+        prefs.edit()
+            .putBoolean(KEY_GPU_FAILED, false)
+            .putBoolean(KEY_GPU_INIT_IN_PROGRESS, false)
+            .apply()
         Log.i(TAG, "GPU failure flag reset - will try GPU on next initialization")
     }
 
@@ -263,6 +277,12 @@ class MediaPipeLlmClient @Inject constructor(
                         try {
                             Log.d(TAG, "Attempting initialization with backend: $backend")
 
+                            // Before GPU init, set a flag synchronously so we can detect native crashes.
+                            // If the GPU driver segfaults, this flag stays set and we'll skip GPU on next launch.
+                            if (backend == LlmInference.Backend.GPU) {
+                                prefs.edit().putBoolean(KEY_GPU_INIT_IN_PROGRESS, true).commit()
+                            }
+
                             val options = LlmInference.LlmInferenceOptions.builder()
                                 .setModelPath(modelFile.absolutePath)
                                 .setMaxTokens(config.maxTokens)
@@ -270,6 +290,12 @@ class MediaPipeLlmClient @Inject constructor(
                                 .build()
 
                             llmInference = LlmInference.createFromOptions(context, options)
+
+                            // GPU init survived - clear the flag
+                            if (backend == LlmInference.Backend.GPU) {
+                                prefs.edit().putBoolean(KEY_GPU_INIT_IN_PROGRESS, false).apply()
+                            }
+
                             currentModelPath = modelFile.absolutePath
                             currentBackend = backend
                             currentConfig = config
@@ -285,6 +311,7 @@ class MediaPipeLlmClient @Inject constructor(
 
                             // If GPU failed, mark it so we don't try again
                             if (backend == LlmInference.Backend.GPU) {
+                                prefs.edit().putBoolean(KEY_GPU_INIT_IN_PROGRESS, false).apply()
                                 markGpuFailed()
                             }
                             // Continue to try next backend
@@ -351,12 +378,12 @@ class MediaPipeLlmClient @Inject constructor(
                     // If app crashes here, we'll detect it on next startup
                     markInferenceStarted()
 
-                    val response = try {
-                        inference.generateResponse(sanitizedPrompt)
-                    } finally {
-                        // Mark inference completed (even if it threw an exception)
-                        markInferenceCompleted()
-                    }
+                    val response = inference.generateResponse(sanitizedPrompt)
+
+                    // Only clear the crash flag after native call returns successfully.
+                    // If the process crashes during generateResponse(), this line never
+                    // executes and the flag remains set for next-startup detection.
+                    markInferenceCompleted()
 
                     val duration = System.currentTimeMillis() - startTime
                     Log.d(TAG, "Generated response in ${duration}ms (${response?.length ?: 0} chars)")
@@ -368,11 +395,15 @@ class MediaPipeLlmClient @Inject constructor(
             }
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Inference timed out after ${INFERENCE_TIMEOUT_MS / 1000} seconds")
-            markInferenceCompleted()
+            // Intentionally leave KEY_INFERENCE_IN_PROGRESS set on timeout.
+            // The native JNI call may still be running and could crash after we return.
+            // On next startup, checkAndHandlePreviousCrash() will increment crash count,
+            // which is correct: repeated timeouts indicate an unstable model/device combo.
             handleInferenceError("Timeout")
             null
         } catch (e: Exception) {
             Log.e(TAG, "Error generating response: ${e.message}", e)
+            // Java/Kotlin exception (not native crash) - safe to clear the flag
             markInferenceCompleted()
             handleInferenceError(e.message ?: "Unknown error")
             null
@@ -444,8 +475,10 @@ class MediaPipeLlmClient @Inject constructor(
         needsSessionRecreation = false
 
         val modelPath = currentModelPath
-        val backend = currentBackend
         val config = currentConfig
+        // Always use CPU when recreating after errors - GPU errors during inference
+        // suggest the GPU backend is unstable for this model/device combination
+        val safeBackend = LlmInference.Backend.CPU
 
         if (modelPath == null) {
             Log.e(TAG, "Cannot recreate session - no model path saved")
@@ -461,27 +494,24 @@ class MediaPipeLlmClient @Inject constructor(
         llmInference = null
         isInitialized = false
 
-        // Recreate with saved parameters
+        // Recreate with CPU backend for stability
         try {
-            Log.d(TAG, "Recreating session with backend: $backend")
+            Log.d(TAG, "Recreating session with backend: $safeBackend (was: $currentBackend)")
 
             val options = LlmInference.LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
                 .setMaxTokens(config?.maxTokens ?: MAX_TOKENS)
-                .apply {
-                    if (backend != null) {
-                        setPreferredBackend(backend)
-                    }
-                }
+                .setPreferredBackend(safeBackend)
                 .build()
 
             val newInference = LlmInference.createFromOptions(context, options)
             // Only update state after successful creation to avoid race conditions
             llmInference = newInference
+            currentBackend = safeBackend
             consecutiveErrors = 0
             isInitialized = true  // Set last, after all resources are ready
 
-            Log.i(TAG, "Session recreated successfully with $backend backend")
+            Log.i(TAG, "Session recreated successfully with $safeBackend backend")
         } catch (e: Exception) {
             // Ensure we're in a clean failed state
             isInitialized = false
@@ -501,7 +531,8 @@ class MediaPipeLlmClient @Inject constructor(
     suspend fun analyzeDetection(
         detection: Detection,
         model: AiModel,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: com.flockyou.privilege.PrivilegeMode? = null
     ): AiAnalysisResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
 
@@ -515,7 +546,7 @@ class MediaPipeLlmClient @Inject constructor(
         }
 
         try {
-            val prompt = buildAnalysisPrompt(detection, enrichedData)
+            val prompt = buildAnalysisPrompt(detection, enrichedData, privilegeMode)
             Log.d(TAG, "Analyzing detection with prompt length: ${prompt.length}, hasEnrichedData=${enrichedData != null}")
             val response = generateResponse(prompt)
 
@@ -556,10 +587,14 @@ class MediaPipeLlmClient @Inject constructor(
      * @param detection The detection to analyze
      * @param enrichedData Optional enriched heuristics data to include in the prompt
      */
-    private fun buildAnalysisPrompt(detection: Detection, enrichedData: EnrichedDetectorData? = null): String {
+    private fun buildAnalysisPrompt(
+        detection: Detection,
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: com.flockyou.privilege.PrivilegeMode? = null
+    ): String {
         // Use compact prompt format for MediaPipe models (better performance on smaller models)
         // Include enriched heuristics data when available for more accurate analysis
-        return CompactPromptTemplates.compactAnalysisPrompt(detection, enrichedData)
+        return CompactPromptTemplates.compactAnalysisPrompt(detection, enrichedData, privilegeMode)
     }
 
     /**

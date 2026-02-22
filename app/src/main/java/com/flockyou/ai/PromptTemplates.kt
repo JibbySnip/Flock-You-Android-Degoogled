@@ -1,7 +1,9 @@
 package com.flockyou.ai
 
+import com.flockyou.data.FeasibilityData
 import com.flockyou.data.model.Detection
 import com.flockyou.monitoring.GnssSatelliteMonitor.GnssAnomalyAnalysis
+import com.flockyou.privilege.PrivilegeMode
 import com.flockyou.service.CellularMonitor.CellularAnomalyAnalysis
 import com.flockyou.service.RogueWifiMonitor.FollowingNetworkAnalysis
 import com.flockyou.service.RfSignalAnalyzer.HiddenNetworkAnalysis
@@ -29,9 +31,11 @@ object PromptTemplates {
      */
     fun buildChainOfThoughtPrompt(
         detection: Detection,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: PrivilegeMode? = null
     ): String {
         val enrichedSection = enrichedData?.let { buildEnrichedDataSection(it) } ?: ""
+        val privilegeSection = privilegeMode?.let { "\n${FeasibilityData.getLlmPrivilegeModeContext(it)}\n" } ?: ""
 
         val content = """You are a privacy security expert analyzing a detected surveillance device.
 
@@ -64,7 +68,7 @@ ${sanitize(detection.deviceName)?.takeIf { it.isNotEmpty() }?.let { "Device Name
 ${sanitize(detection.ssid)?.takeIf { it.isNotEmpty() }?.let { "Network SSID: $it" } ?: ""}
 ${sanitize(detection.matchedPatterns)?.takeIf { it.isNotEmpty() }?.let { "Matched Patterns: $it" } ?: ""}
 $enrichedSection
-
+$privilegeSection
 Provide your analysis following these steps."""
 
         return wrapGemmaPrompt(content)
@@ -77,9 +81,11 @@ Provide your analysis following these steps."""
      */
     fun buildFewShotPrompt(
         detection: Detection,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: PrivilegeMode? = null
     ): String {
         val enrichedSection = enrichedData?.let { buildEnrichedDataSection(it) } ?: ""
+        val privilegeSection = privilegeMode?.let { "\n${FeasibilityData.getLlmPrivilegeModeContext(it)}\n" } ?: ""
 
         val content = """You are a surveillance detection expert. Analyze detected devices and provide clear, actionable guidance.
 
@@ -136,7 +142,7 @@ Device: ${detection.deviceType.displayName}
 Signal: ${detection.signalStrength.displayName} (${detection.rssi} dBm)
 Threat: ${detection.threatLevel.displayName}
 ${enrichedSection}
-
+$privilegeSection
 Provide your analysis in the same format as the examples above."""
 
         return wrapGemmaPrompt(content)
@@ -154,9 +160,11 @@ Provide your analysis in the same format as the examples above."""
      */
     fun buildStructuredOutputPrompt(
         detection: Detection,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: PrivilegeMode? = null
     ): String {
         val enrichedSection = enrichedData?.let { buildEnrichedDataSection(it) } ?: ""
+        val privilegeSection = privilegeMode?.let { "\n${FeasibilityData.getLlmPrivilegeModeContext(it)}\n" } ?: ""
 
         // Calculate estimated false positive likelihood for context
         val estimatedFpLikelihood = estimateFalsePositiveLikelihood(detection, enrichedData)
@@ -181,6 +189,7 @@ $enrichedSection
 
 Estimated False Positive Likelihood: ${estimatedFpLikelihood}%
 ${if (estimatedFpLikelihood > 50) "NOTE: This detection is MORE LIKELY to be a false alarm than a real threat." else ""}
+$privilegeSection
 
 Respond with this exact JSON structure:
 {

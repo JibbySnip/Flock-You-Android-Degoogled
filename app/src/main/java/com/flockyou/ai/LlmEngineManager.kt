@@ -362,7 +362,8 @@ class LlmEngineManager @Inject constructor(
      */
     suspend fun analyzeDetection(
         detection: Detection,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: com.flockyou.privilege.PrivilegeMode? = null
     ): AiAnalysisResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
 
@@ -389,7 +390,7 @@ class LlmEngineManager @Inject constructor(
             // Wrap entire analysis in timeout to prevent indefinite hangs
             val result = withTimeoutOrNull(ANALYSIS_TIMEOUT_MS) {
                 // Try current active engine first
-                var analysisResult = tryAnalyzeWithEngine(currentEngine, detection, enrichedData)
+                var analysisResult = tryAnalyzeWithEngine(currentEngine, detection, enrichedData, privilegeMode)
                 Log.d(TAG, "  tryAnalyzeWithEngine($currentEngine) returned: success=${analysisResult?.success}, error=${analysisResult?.error}")
 
                 // If failed, try fallback chain
@@ -398,7 +399,7 @@ class LlmEngineManager @Inject constructor(
 
                     for (engine in getFallbackOrder(currentEngine)) {
                         Log.d(TAG, "  Trying fallback engine: $engine")
-                        analysisResult = tryAnalyzeWithEngine(engine, detection, enrichedData)
+                        analysisResult = tryAnalyzeWithEngine(engine, detection, enrichedData, privilegeMode)
                         Log.d(TAG, "    Result: success=${analysisResult?.success}, error=${analysisResult?.error}")
                         if (analysisResult != null && analysisResult.success) {
                             Log.i(TAG, "Fallback to $engine succeeded!")
@@ -450,7 +451,8 @@ class LlmEngineManager @Inject constructor(
     private suspend fun tryAnalyzeWithEngine(
         engine: LlmEngine,
         detection: Detection,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: com.flockyou.privilege.PrivilegeMode? = null
     ): AiAnalysisResult? {
         return try {
             when (engine) {
@@ -459,7 +461,7 @@ class LlmEngineManager @Inject constructor(
                     Log.d(TAG, "tryAnalyzeWithEngine(GEMINI_NANO): isReady=$isReady, hasEnrichedData=${enrichedData != null}")
                     if (isReady) {
                         Log.d(TAG, "Calling geminiNanoClient.analyzeDetection() with enrichedData=${enrichedData?.javaClass?.simpleName}")
-                        val result = geminiNanoClient.analyzeDetection(detection, enrichedData)
+                        val result = geminiNanoClient.analyzeDetection(detection, enrichedData, privilegeMode)
                         Log.d(TAG, "geminiNanoClient.analyzeDetection() returned: success=${result.success}, modelUsed=${result.modelUsed}, error=${result.error}")
                         if (result.success) {
                             recordSuccess(LlmEngine.GEMINI_NANO)
@@ -477,7 +479,7 @@ class LlmEngineManager @Inject constructor(
                 LlmEngine.MEDIAPIPE -> {
                     if (mediaPipeLlmClient.isReady()) {
                         Log.d(TAG, "Calling mediaPipeLlmClient.analyzeDetection() with enrichedData=${enrichedData?.javaClass?.simpleName}")
-                        val result = mediaPipeLlmClient.analyzeDetection(detection, _currentModel, enrichedData)
+                        val result = mediaPipeLlmClient.analyzeDetection(detection, _currentModel, enrichedData, privilegeMode)
                         if (result.success) {
                             recordSuccess(LlmEngine.MEDIAPIPE)
                         } else {

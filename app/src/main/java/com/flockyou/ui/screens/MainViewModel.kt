@@ -168,6 +168,10 @@ class MainViewModel @Inject constructor(
     internal val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
+    // Privilege mode for feasibility-aware UI
+    val privilegeMode: com.flockyou.privilege.PrivilegeMode =
+        com.flockyou.privilege.PrivilegeModeDetector.detect(application)
+
     // Expose the service connection bound state for debugging
     val serviceConnectionBound: StateFlow<Boolean> = serviceConnection.isBound
 

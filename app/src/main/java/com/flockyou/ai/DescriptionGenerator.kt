@@ -2,8 +2,11 @@ package com.flockyou.ai
 
 import com.flockyou.data.model.Detection
 import com.flockyou.data.model.DetectionMethod
+import com.flockyou.data.model.DetectionProtocol
+import com.flockyou.data.model.DetectionSource
 import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.ThreatLevel
+import com.flockyou.privilege.PrivilegeMode
 
 /**
  * Generates enterprise-grade detection descriptions with comprehensive, actionable intelligence.
@@ -331,6 +334,12 @@ object DescriptionGenerator {
         return indicators
     }
 
+    /**
+     * Current privilege mode, set externally before generating descriptions.
+     * This allows the rule-based generator to factor in detection limitations.
+     */
+    var privilegeMode: PrivilegeMode? = null
+
     private fun generateConfidenceAssessment(
         detection: Detection,
         enrichedData: EnrichedDetectorData?
@@ -392,10 +401,84 @@ object DescriptionGenerator {
             reasons.add("Detected ${detection.seenCount} times - consistent presence")
         }
 
+        // Privilege-aware confidence adjustments
+        applyPrivilegeModeAdjustments(detection, enrichedData, confidence, reasons)?.let {
+            confidence = it.first
+            // reasons already mutated in-place
+        }
+
         confidence = confidence.coerceIn(0, 100)
         val reasoning = reasons.joinToString("; ")
 
         return Pair(confidence, reasoning)
+    }
+
+    /**
+     * Apply confidence adjustments based on app privilege mode.
+     * Returns adjusted confidence or null if no adjustment needed.
+     */
+    private fun applyPrivilegeModeAdjustments(
+        detection: Detection,
+        enrichedData: EnrichedDetectorData?,
+        currentConfidence: Int,
+        reasons: MutableList<String>
+    ): Pair<Int, Unit>? {
+        val mode = privilegeMode ?: return null
+        var adjusted = currentConfidence
+
+        // Shannon SDM detections are definitive
+        if (detection.detectionSource == DetectionSource.SHANNON_SDM) {
+            adjusted += 20
+            reasons.add("Shannon SDM: definitive modem-level detection")
+            return Pair(adjusted, Unit)
+        }
+
+        when (detection.protocol) {
+            DetectionProtocol.CELLULAR -> {
+                when (mode) {
+                    is PrivilegeMode.Sideload -> {
+                        adjusted -= 15
+                        reasons.add("Sideload mode: cannot confirm IMSI capture")
+                    }
+                    is PrivilegeMode.System -> {
+                        adjusted -= 10
+                        reasons.add("System mode: enhanced monitoring but no IMEI/IMSI access")
+                    }
+                    is PrivilegeMode.OEM -> {
+                        if (enrichedData is EnrichedDetectorData.Shannon) {
+                            adjusted += 10
+                            reasons.add("OEM mode with Shannon SDM confirmation")
+                        }
+                    }
+                }
+            }
+            DetectionProtocol.RF -> {
+                if (mode is PrivilegeMode.Sideload || mode is PrivilegeMode.System) {
+                    adjusted -= 20
+                    reasons.add("WiFi-proxy inference only (no direct RF measurement)")
+                }
+            }
+            DetectionProtocol.WIFI -> {
+                if (mode is PrivilegeMode.Sideload) {
+                    when (detection.detectionMethod) {
+                        DetectionMethod.WIFI_DEAUTH_ATTACK, DetectionMethod.WIFI_KARMA_ATTACK -> {
+                            adjusted -= 10
+                            reasons.add("Heuristic only (no 802.11 monitor mode)")
+                        }
+                        else -> {}
+                    }
+                }
+            }
+            DetectionProtocol.BLUETOOTH_LE -> {
+                if (mode is PrivilegeMode.Sideload) {
+                    adjusted -= 5
+                    reasons.add("Duty-cycled scanning, randomized MACs")
+                }
+            }
+            else -> {}
+        }
+
+        return Pair(adjusted, Unit)
     }
 
     private fun generateFalsePositiveReasons(

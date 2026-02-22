@@ -11,13 +11,18 @@ import com.flockyou.data.model.DeviceType
 import com.flockyou.data.model.ThreatLevel
 import com.flockyou.data.repository.DetectionRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -48,6 +53,8 @@ import com.flockyou.detection.profile.PrivacyImpact
 import com.flockyou.detection.profile.Recommendation
 import com.flockyou.detection.profile.RecommendationUrgency
 import com.flockyou.detection.handler.DeviceTypeProfile as HandlerProfile
+import com.flockyou.privilege.PrivilegeMode
+import com.flockyou.privilege.PrivilegeModeDetector
 
 /**
  * Result type for progressive analysis pipeline.
@@ -137,6 +144,9 @@ class DetectionAnalyzer @Inject constructor(
         private const val INITIAL_RETRY_DELAY_MS = 1000L
     }
 
+    private val scopeJob = SupervisorJob()
+    private val scope = CoroutineScope(scopeJob + Dispatchers.Default)
+
     private val _modelStatus = MutableStateFlow<AiModelStatus>(AiModelStatus.NotDownloaded)
     val modelStatus: StateFlow<AiModelStatus> = _modelStatus.asStateFlow()
 
@@ -168,6 +178,9 @@ class DetectionAnalyzer @Inject constructor(
             .connectionPool(ConnectionPool(maxIdleConnections = 2, keepAliveDuration = 5, TimeUnit.MINUTES))
             .build()
     }
+
+    // Privilege mode for feasibility-aware analysis
+    private val privilegeMode: PrivilegeMode = PrivilegeModeDetector.detect(context)
 
     // Thread-safe model state using atomic references
     private val currentModelRef = AtomicReference(AiModel.RULE_BASED)
@@ -206,6 +219,8 @@ class DetectionAnalyzer @Inject constructor(
         falsePositiveAnalyzer.setLazyInitCallback {
             initializeMediaPipeForFpAnalysis()
         }
+        // Set privilege mode on DescriptionGenerator for feasibility-aware confidence adjustments
+        DescriptionGenerator.privilegeMode = privilegeMode
     }
 
     // Mutex for analysis to prevent concurrent analysis operations
@@ -1097,7 +1112,7 @@ class DetectionAnalyzer @Inject constructor(
             // Retrieve enriched heuristics data for this detection if available
             val enrichedData = enrichedDataCache.get(detection.id)
             Log.d(TAG, "Attempting LLM analysis (activeEngine=$activeEngine, anyLlmReady=$anyLlmReady, hasEnrichedData=${enrichedData != null})")
-            val llmResult = llmEngineManager.analyzeDetection(detection, enrichedData)
+            val llmResult = llmEngineManager.analyzeDetection(detection, enrichedData, privilegeMode)
 
             if (llmResult.success) {
                 Log.i(TAG, "LLM analysis succeeded! Model: ${llmResult.modelUsed}, Response length: ${llmResult.analysis?.length ?: 0}")
@@ -1483,8 +1498,9 @@ class DetectionAnalyzer @Inject constructor(
     /**
      * Get the name of the currently active LLM engine.
      */
-    val activeEngineName: StateFlow<String>
-        get() = MutableStateFlow(llmEngineManager.activeEngine.value.displayName).asStateFlow()
+    val activeEngineName: StateFlow<String> = llmEngineManager.activeEngine
+        .map { it.displayName }
+        .stateIn(scope, SharingStarted.Eagerly, llmEngineManager.activeEngine.value.displayName)
 
     /**
      * Cancel an ongoing model download.
@@ -1758,6 +1774,7 @@ What is an IMSI catcher? Reply in one sentence.
      * Call this when the component is being destroyed to prevent memory leaks.
      */
     suspend fun cleanup() {
+        scopeJob.cancel()
         cancelAnalysis()
         falsePositiveAnalyzer.clearLazyInitCallback()
         cacheMutex.withLock {

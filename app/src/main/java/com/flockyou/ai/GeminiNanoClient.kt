@@ -495,7 +495,8 @@ class GeminiNanoClient @Inject constructor(
      */
     suspend fun analyzeDetection(
         detection: Detection,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: com.flockyou.privilege.PrivilegeMode? = null
     ): AiAnalysisResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
 
@@ -512,7 +513,7 @@ class GeminiNanoClient @Inject constructor(
         try {
             withTimeout(INFERENCE_TIMEOUT_MS) {
                 // Build the prompt for surveillance device analysis with enriched heuristics data
-                val prompt = buildAnalysisPrompt(detection, enrichedData)
+                val prompt = buildAnalysisPrompt(detection, enrichedData, privilegeMode)
                 Log.d(TAG, "Generating analysis with Gemini Nano (prompt length: ${prompt.length}, hasEnrichedData=${enrichedData != null})")
 
                 // Generate content using ML Kit GenAI
@@ -661,10 +662,14 @@ class GeminiNanoClient @Inject constructor(
      * Build a prompt for surveillance device analysis.
      * Gemini Nano is powerful enough for verbose prompts, but uses structured output for consistency.
      */
-    private fun buildAnalysisPrompt(detection: Detection, enrichedData: EnrichedDetectorData? = null): String {
+    private fun buildAnalysisPrompt(
+        detection: Detection,
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: com.flockyou.privilege.PrivilegeMode? = null
+    ): String {
         // Use structured output prompt for consistent, parseable results
         // Include enriched heuristics data when available for more accurate analysis
-        return PromptTemplates.buildStructuredOutputPrompt(detection, enrichedData)
+        return PromptTemplates.buildStructuredOutputPrompt(detection, enrichedData, privilegeMode)
     }
 
     /**

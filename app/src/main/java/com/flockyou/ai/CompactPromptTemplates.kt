@@ -1,8 +1,10 @@
 package com.flockyou.ai
 
+import com.flockyou.data.FeasibilityData
 import com.flockyou.data.model.Detection
 import com.flockyou.data.model.ThreatLevel
 import com.flockyou.monitoring.GnssSatelliteMonitor.GnssAnomalyAnalysis
+import com.flockyou.privilege.PrivilegeMode
 import com.flockyou.service.CellularMonitor.CellularAnomalyAnalysis
 import com.flockyou.service.RogueWifiMonitor.FollowingNetworkAnalysis
 import com.flockyou.service.UltrasonicDetector.BeaconAnalysis
@@ -68,10 +70,12 @@ $content
      */
     fun compactAnalysisPrompt(
         detection: Detection,
-        enrichedData: EnrichedDetectorData? = null
+        enrichedData: EnrichedDetectorData? = null,
+        privilegeMode: PrivilegeMode? = null
     ): String {
         val enrichedSection = enrichedData?.let { buildCompactEnrichedSection(it) } ?: ""
         val fpLikelihood = estimateFalsePositiveLikelihood(detection, enrichedData)
+        val privilegeSection = privilegeMode?.let { "\n${FeasibilityData.getCompactLlmPrivilegeModeContext(it)}" } ?: ""
 
         val content = """$ABBREVIATION_LEGEND
 
@@ -99,6 +103,7 @@ ${sanitize(detection.manufacturer)?.takeIf { it.isNotEmpty() }?.let { "mfr=$it" 
 ${sanitize(detection.deviceName)?.takeIf { it.isNotEmpty() }?.let { "name=$it" } ?: ""}
 $enrichedSection
 est_fp=$fpLikelihood%
+$privilegeSection
 
 RULES:
 -fp_pct>50:fp_likely=true,calm tone

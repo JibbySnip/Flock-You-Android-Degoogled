@@ -19,8 +19,13 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.content.Context
 import com.flockyou.data.*
+import com.flockyou.data.model.DetectionProtocol
+import com.flockyou.privilege.PrivilegeMode
+import com.flockyou.privilege.PrivilegeModeDetector
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -29,9 +34,12 @@ import javax.inject.Inject
 
 @HiltViewModel
 class DetectionSettingsViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val repository: DetectionSettingsRepository
 ) : ViewModel() {
-    
+
+    val privilegeMode: PrivilegeMode = PrivilegeModeDetector.detect(context)
+
     val settings: StateFlow<DetectionSettings> = repository.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DetectionSettings())
     
@@ -226,6 +234,7 @@ fun DetectionSettingsScreen(
     onNavigateBack: () -> Unit
 ) {
     val settings by viewModel.settings.collectAsState()
+    val privilegeMode = viewModel.privilegeMode
 
     var selectedTab by remember { mutableStateOf(0) }
     val tabs = listOf("Cellular", "Satellite", "BLE", "WiFi", "GNSS", "RF", "Ultrasonic")
@@ -303,6 +312,7 @@ fun DetectionSettingsScreen(
             when (selectedTab) {
                 0 -> CellularSettingsContent(
                     settings = settings,
+                    privilegeMode = privilegeMode,
                     onTogglePattern = { pattern, enabled ->
                         viewModel.toggleCellularPattern(pattern, enabled)
                     },
@@ -317,6 +327,7 @@ fun DetectionSettingsScreen(
                 )
                 1 -> SatelliteSettingsContent(
                     settings = settings,
+                    privilegeMode = privilegeMode,
                     onTogglePattern = { pattern, enabled ->
                         viewModel.toggleSatellitePattern(pattern, enabled)
                     },
@@ -331,6 +342,7 @@ fun DetectionSettingsScreen(
                 )
                 2 -> BleSettingsContent(
                     settings = settings,
+                    privilegeMode = privilegeMode,
                     onTogglePattern = { pattern, enabled ->
                         viewModel.toggleBlePattern(pattern, enabled)
                     },
@@ -344,6 +356,7 @@ fun DetectionSettingsScreen(
                 )
                 3 -> WifiSettingsContent(
                     settings = settings,
+                    privilegeMode = privilegeMode,
                     onTogglePattern = { pattern, enabled ->
                         viewModel.toggleWifiPattern(pattern, enabled)
                     },
@@ -358,6 +371,7 @@ fun DetectionSettingsScreen(
                 )
                 4 -> GnssSettingsContent(
                     settings = settings,
+                    privilegeMode = privilegeMode,
                     onTogglePattern = { pattern, enabled ->
                         viewModel.toggleGnssPattern(pattern, enabled)
                     },
@@ -371,6 +385,7 @@ fun DetectionSettingsScreen(
                 )
                 5 -> RfSettingsContent(
                     settings = settings,
+                    privilegeMode = privilegeMode,
                     onTogglePattern = { pattern, enabled ->
                         viewModel.toggleRfPattern(pattern, enabled)
                     },
@@ -383,6 +398,7 @@ fun DetectionSettingsScreen(
                 )
                 6 -> UltrasonicSettingsContent(
                     settings = settings,
+                    privilegeMode = privilegeMode,
                     onTogglePattern = { pattern, enabled ->
                         viewModel.toggleUltrasonicPattern(pattern, enabled)
                     },
@@ -514,6 +530,7 @@ private fun HelpSection(
 @Composable
 private fun CellularSettingsContent(
     settings: DetectionSettings,
+    privilegeMode: PrivilegeMode,
     onTogglePattern: (CellularPattern, Boolean) -> Unit,
     onToggleGlobal: (Boolean) -> Unit,
     onUpdateSignalSpike: (Int) -> Unit,
@@ -538,6 +555,13 @@ private fun CellularSettingsContent(
                 onToggle = onToggleGlobal,
                 enabledCount = settings.enabledCellularPatterns.size,
                 totalCount = CellularPattern.values().size
+            )
+        }
+
+        // Feasibility banner
+        item {
+            FeasibilityInfoBanner(
+                feasibility = FeasibilityData.getProtocolFeasibility(DetectionProtocol.CELLULAR, privilegeMode)
             )
         }
 
@@ -570,12 +594,15 @@ private fun CellularSettingsContent(
         }
 
         items(CellularPattern.values().toList()) { pattern ->
+            val feasibility = FeasibilityData.getPatternFeasibility(pattern, privilegeMode)
             PatternToggleCard(
                 name = pattern.displayName,
                 description = pattern.description,
                 enabled = pattern in settings.enabledCellularPatterns,
                 globalEnabled = settings.enableCellularDetection,
-                onToggle = { onTogglePattern(pattern, it) }
+                onToggle = { onTogglePattern(pattern, it) },
+                feasibilityNote = feasibility?.note,
+                feasibilityLevel = feasibility?.level
             )
         }
 
@@ -668,6 +695,7 @@ private fun CellularThresholdsContent(
 @Composable
 private fun SatelliteSettingsContent(
     settings: DetectionSettings,
+    privilegeMode: PrivilegeMode,
     onTogglePattern: (SatellitePattern, Boolean) -> Unit,
     onToggleGlobal: (Boolean) -> Unit,
     onUpdateUnexpectedThreshold: (Long) -> Unit,
@@ -692,6 +720,13 @@ private fun SatelliteSettingsContent(
                 onToggle = onToggleGlobal,
                 enabledCount = settings.enabledSatellitePatterns.size,
                 totalCount = SatellitePattern.values().size
+            )
+        }
+
+        // Feasibility banner
+        item {
+            FeasibilityInfoBanner(
+                feasibility = FeasibilityData.getProtocolFeasibility(DetectionProtocol.SATELLITE, privilegeMode)
             )
         }
 
@@ -821,6 +856,7 @@ private fun SatelliteThresholdsContent(
 @Composable
 private fun BleSettingsContent(
     settings: DetectionSettings,
+    privilegeMode: PrivilegeMode,
     onTogglePattern: (BlePattern, Boolean) -> Unit,
     onToggleGlobal: (Boolean) -> Unit,
     onUpdateMinRssi: (Int) -> Unit,
@@ -844,6 +880,13 @@ private fun BleSettingsContent(
                 onToggle = onToggleGlobal,
                 enabledCount = settings.enabledBlePatterns.size,
                 totalCount = BlePattern.values().size
+            )
+        }
+
+        // Feasibility banner
+        item {
+            FeasibilityInfoBanner(
+                feasibility = FeasibilityData.getProtocolFeasibility(DetectionProtocol.BLUETOOTH_LE, privilegeMode)
             )
         }
 
@@ -1261,6 +1304,7 @@ private fun getRssiMeaning(rssi: Int): String {
 @Composable
 private fun WifiSettingsContent(
     settings: DetectionSettings,
+    privilegeMode: PrivilegeMode,
     onTogglePattern: (WifiPattern, Boolean) -> Unit,
     onToggleGlobal: (Boolean) -> Unit,
     onUpdateMinSignal: (Int) -> Unit,
@@ -1285,6 +1329,13 @@ private fun WifiSettingsContent(
                 onToggle = onToggleGlobal,
                 enabledCount = settings.enabledWifiPatterns.size,
                 totalCount = WifiPattern.values().size
+            )
+        }
+
+        // Feasibility banner
+        item {
+            FeasibilityInfoBanner(
+                feasibility = FeasibilityData.getProtocolFeasibility(DetectionProtocol.WIFI, privilegeMode)
             )
         }
 
@@ -1317,12 +1368,15 @@ private fun WifiSettingsContent(
         }
 
         items(WifiPattern.values().toList()) { pattern ->
+            val feasibility = FeasibilityData.getPatternFeasibility(pattern, privilegeMode)
             PatternToggleCard(
                 name = pattern.displayName,
                 description = pattern.description,
                 enabled = pattern in settings.enabledWifiPatterns,
                 globalEnabled = settings.enableWifiDetection,
-                onToggle = { onTogglePattern(pattern, it) }
+                onToggle = { onTogglePattern(pattern, it) },
+                feasibilityNote = feasibility?.note,
+                feasibilityLevel = feasibility?.level
             )
         }
 
@@ -1531,17 +1585,90 @@ private fun ThresholdsSectionCard(
 }
 
 @Composable
+private fun FeasibilityInfoBanner(
+    feasibility: ProtocolFeasibility
+) {
+    val (containerColor, contentColor, iconTint) = when (feasibility.level) {
+        FeasibilityLevel.FULL -> Triple(
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
+            MaterialTheme.colorScheme.onPrimaryContainer,
+            MaterialTheme.colorScheme.primary
+        )
+        FeasibilityLevel.DEGRADED -> Triple(
+            MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f),
+            MaterialTheme.colorScheme.onTertiaryContainer,
+            MaterialTheme.colorScheme.tertiary
+        )
+        FeasibilityLevel.HEURISTIC_ONLY -> Triple(
+            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.3f),
+            MaterialTheme.colorScheme.onSecondaryContainer,
+            MaterialTheme.colorScheme.secondary
+        )
+        FeasibilityLevel.NOT_FEASIBLE -> Triple(
+            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
+            MaterialTheme.colorScheme.onErrorContainer,
+            MaterialTheme.colorScheme.error
+        )
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = containerColor)
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(
+                imageVector = when (feasibility.level) {
+                    FeasibilityLevel.FULL -> Icons.Default.CheckCircle
+                    FeasibilityLevel.DEGRADED -> Icons.Default.Info
+                    FeasibilityLevel.HEURISTIC_ONLY -> Icons.Default.Warning
+                    FeasibilityLevel.NOT_FEASIBLE -> Icons.Default.Error
+                },
+                contentDescription = null,
+                tint = iconTint,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(
+                    text = "${feasibility.level.displayName}: ${feasibility.summary}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium,
+                    color = contentColor
+                )
+                feasibility.upgradeNote?.let { note ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = note,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = contentColor.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PatternToggleCard(
     name: String,
     description: String,
     enabled: Boolean,
     globalEnabled: Boolean,
-    onToggle: (Boolean) -> Unit
+    onToggle: (Boolean) -> Unit,
+    feasibilityNote: String? = null,
+    feasibilityLevel: FeasibilityLevel? = null
 ) {
+    val isNotFeasible = feasibilityLevel == FeasibilityLevel.NOT_FEASIBLE
+    val effectiveEnabled = globalEnabled && !isNotFeasible
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = when {
+                isNotFeasible -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
                 !globalEnabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                 enabled -> MaterialTheme.colorScheme.surface
                 else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
@@ -1560,19 +1687,31 @@ private fun PatternToggleCard(
                     text = name,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
-                    color = if (globalEnabled) MaterialTheme.colorScheme.onSurface 
-                           else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (effectiveEnabled) MaterialTheme.colorScheme.onSurface
+                           else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isNotFeasible) 0.5f else 1f)
                 )
                 Text(
                     text = description,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isNotFeasible) 0.5f else 1f)
                 )
+                if (feasibilityNote != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = feasibilityNote,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when (feasibilityLevel) {
+                            FeasibilityLevel.NOT_FEASIBLE -> MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+                            FeasibilityLevel.HEURISTIC_ONLY -> MaterialTheme.colorScheme.secondary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        }
+                    )
+                }
             }
             Switch(
-                checked = enabled && globalEnabled,
+                checked = enabled && effectiveEnabled,
                 onCheckedChange = { onToggle(it) },
-                enabled = globalEnabled
+                enabled = effectiveEnabled
             )
         }
     }
@@ -1583,6 +1722,7 @@ private fun PatternToggleCard(
 @Composable
 private fun GnssSettingsContent(
     settings: DetectionSettings,
+    privilegeMode: PrivilegeMode,
     onTogglePattern: (GnssPattern, Boolean) -> Unit,
     onToggleGlobal: (Boolean) -> Unit,
     onUpdateCn0Deviation: (Double) -> Unit,
@@ -1605,6 +1745,13 @@ private fun GnssSettingsContent(
                 onToggle = onToggleGlobal,
                 enabledCount = settings.enabledGnssPatterns.size,
                 totalCount = GnssPattern.values().size
+            )
+        }
+
+        // Feasibility banner
+        item {
+            FeasibilityInfoBanner(
+                feasibility = FeasibilityData.getProtocolFeasibility(DetectionProtocol.GNSS, privilegeMode)
             )
         }
 
@@ -1634,12 +1781,15 @@ private fun GnssSettingsContent(
         }
 
         items(GnssPattern.values().toList()) { pattern ->
+            val feasibility = FeasibilityData.getPatternFeasibility(pattern, privilegeMode)
             PatternToggleCard(
                 name = pattern.displayName,
                 description = pattern.description,
                 enabled = pattern in settings.enabledGnssPatterns,
                 globalEnabled = settings.enableGnssDetection,
-                onToggle = { onTogglePattern(pattern, it) }
+                onToggle = { onTogglePattern(pattern, it) },
+                feasibilityNote = feasibility?.note,
+                feasibilityLevel = feasibility?.level
             )
         }
 
@@ -1717,6 +1867,7 @@ private fun GnssThresholdsContent(
 @Composable
 private fun RfSettingsContent(
     settings: DetectionSettings,
+    privilegeMode: PrivilegeMode,
     onTogglePattern: (RfPattern, Boolean) -> Unit,
     onToggleGlobal: (Boolean) -> Unit,
     onUpdateHiddenNetworkThreshold: (Int) -> Unit,
@@ -1741,32 +1892,11 @@ private fun RfSettingsContent(
             )
         }
 
-        // Info banner
+        // Feasibility banner (replaces hardcoded RF info banner)
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
-                )
-            ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "RF features require Flipper Zero or system privileges for sub-GHz scanning",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
-                }
-            }
+            FeasibilityInfoBanner(
+                feasibility = FeasibilityData.getProtocolFeasibility(DetectionProtocol.RF, privilegeMode)
+            )
         }
 
         item {
@@ -1882,6 +2012,7 @@ private fun RfThresholdsContent(
 @Composable
 private fun UltrasonicSettingsContent(
     settings: DetectionSettings,
+    privilegeMode: PrivilegeMode,
     onTogglePattern: (UltrasonicPattern, Boolean) -> Unit,
     onToggleGlobal: (Boolean) -> Unit,
     onUpdateMinAmplitude: (Double) -> Unit,
@@ -1906,32 +2037,11 @@ private fun UltrasonicSettingsContent(
             )
         }
 
-        // Info banner
+        // Feasibility banner (replaces hardcoded Ultrasonic info banner)
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
-                )
-            ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Privacy consent managed in Privacy Settings. Microphone access required.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
-                }
-            }
+            FeasibilityInfoBanner(
+                feasibility = FeasibilityData.getProtocolFeasibility(DetectionProtocol.AUDIO, privilegeMode)
+            )
         }
 
         item {

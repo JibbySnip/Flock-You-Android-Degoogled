@@ -21,8 +21,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.flockyou.config.NetworkConfig
+import com.flockyou.data.FeasibilityData
 import com.flockyou.data.model.*
 import com.flockyou.detection.ThreatScoring
+import com.flockyou.privilege.PrivilegeMode
 import com.flockyou.ui.components.*
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
@@ -48,7 +50,8 @@ fun DetectionDetailSheet(
     advancedMode: Boolean = false,
     relatedDetections: List<Detection> = emptyList(),
     onRelatedDetectionClick: (Detection) -> Unit = {},
-    onSeeAllRelatedClick: (() -> Unit)? = null
+    onSeeAllRelatedClick: (() -> Unit)? = null,
+    privilegeMode: PrivilegeMode? = null
 ) {
     val threatColor = detection.threatLevel.toColor()
     val deviceInfo = DetectionPatterns.getDeviceTypeInfo(detection.deviceType)
@@ -148,6 +151,40 @@ fun DetectionDetailSheet(
                     )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Detection Reliability Note (feasibility-aware)
+            if (privilegeMode != null) {
+                val reliabilityNote = FeasibilityData.getDetectionReliabilityNote(detection, privilegeMode)
+                if (reliabilityNote != null) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.tertiary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = reliabilityNote,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+                }
             }
 
             // AI Analysis Section (show if any FP analysis was performed - LLM or rule-based)

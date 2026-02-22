@@ -853,6 +853,7 @@ fun MainScreen(
 
         DetectionDetailSheet(
             detection = detection,
+            privilegeMode = viewModel.privilegeMode,
             onDismiss = {
                 viewModel.clearRelatedDetections()
                 selectedDetection = null
