@@ -48,6 +48,7 @@ fun DetectionDetailSheet(
     onAddNote: (String?) -> Unit = {},
     onExport: () -> Unit = {},
     advancedMode: Boolean = false,
+    enrichedData: com.flockyou.ai.EnrichedDetectorData? = null,
     relatedDetections: List<Detection> = emptyList(),
     onRelatedDetectionClick: (Detection) -> Unit = {},
     onSeeAllRelatedClick: (() -> Unit)? = null,
@@ -641,8 +642,8 @@ fun DetectionDetailSheet(
                 }
             }
 
-            // Advanced Mode: Heuristics & Scoring Analysis Section
-            if (advancedMode) {
+            // Heuristics & Scoring Analysis Section (visible in all modes, collapsed by default in simple mode)
+            run {
                 item {
                     CollapsibleSection(
                         title = "Heuristics Analysis",
@@ -827,9 +828,11 @@ fun DetectionDetailSheet(
                                 }
                             }
 
-                            // Matched Patterns (if available)
-                            detection.matchedPatterns?.let { patterns ->
-                                if (patterns.isNotEmpty() && patterns != "[]" && patterns != "null") {
+                            // Matched Patterns (if available) - rendered as human-readable chips
+                            val parsedPatterns = remember(detection.matchedPatterns) {
+                                com.flockyou.ui.components.parseMatchedPatterns(detection.matchedPatterns)
+                            }
+                            if (parsedPatterns.isNotEmpty()) {
                                     Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                                     Column {
                                         Text(
@@ -839,14 +842,26 @@ fun DetectionDetailSheet(
                                             color = MaterialTheme.colorScheme.onSecondaryContainer
                                         )
                                         Spacer(modifier = Modifier.height(4.dp))
-                                        Text(
-                                            text = patterns,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
-                                        )
+                                        @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+                                        androidx.compose.foundation.layout.FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            parsedPatterns.forEach { (type, value) ->
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                                                ) {
+                                                    Text(
+                                                        text = "$type: $value",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
-                                }
                             }
 
                             // Score Calculation Summary
@@ -887,6 +902,14 @@ fun DetectionDetailSheet(
                         }
                     }
                     Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                // Enriched Analysis Section (only when enriched data available)
+                if (enrichedData != null) {
+                    item {
+                        EnrichedDataSection(enrichedData = enrichedData)
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
                 }
 
                 // Advanced Mode: Raw Technical Data Section

@@ -93,6 +93,51 @@ private val Icons.Outlined.RadarOutlined: ImageVector
     get() = Icons.Default.Radar
 
 /**
+ * Empty state shown when filters are active but no detections match.
+ * Offers a "Clear Filters" button to help the user recover.
+ */
+@Composable
+fun FilteredEmptyState(
+    onClearFilters: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(
+            imageVector = Icons.Default.FilterAlt,
+            contentDescription = "No matches",
+            modifier = Modifier.size(64.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "No detections match your filters",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "Try adjusting your filters or search query",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        OutlinedButton(onClick = onClearFilters) {
+            Icon(
+                imageVector = Icons.Default.FilterAltOff,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Clear Filters")
+        }
+    }
+}
+
+/**
  * Shared section header component for settings screens
  */
 @Composable

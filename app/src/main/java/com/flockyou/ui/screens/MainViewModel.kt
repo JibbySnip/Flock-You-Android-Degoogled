@@ -43,6 +43,25 @@ import kotlinx.coroutines.Job
 import javax.inject.Inject
 
 /**
+ * View mode for detection list display
+ */
+enum class DetectionViewMode(val label: String) {
+    TIMELINE("Timeline"),
+    INCIDENTS("Incidents")
+}
+
+/**
+ * Sort order options for detection history list
+ */
+enum class SortOrder(val label: String) {
+    NEWEST_FIRST("Newest First"),
+    OLDEST_FIRST("Oldest First"),
+    THREAT_SCORE_DESC("Highest Threat"),
+    SIGNAL_STRENGTH_DESC("Strongest Signal"),
+    SEEN_COUNT_DESC("Most Seen")
+}
+
+/**
  * Time range presets for filtering detections
  */
 enum class TimeRange(val label: String, val durationMs: Long?) {
@@ -74,6 +93,9 @@ data class MainUiState(
     val filterCustomEndTime: Long? = null,
     val filterSignalStrength: Set<SignalStrength> = emptySet(), // Empty = all signal strengths
     val filterActiveOnly: Boolean = false,
+    // Sort and search
+    val sortOrder: SortOrder = SortOrder.NEWEST_FIRST,
+    val searchQuery: String = "",
     // Status information
     val scanStatus: com.flockyou.service.ScanStatus = com.flockyou.service.ScanStatus.Idle,
     val bleStatus: com.flockyou.service.SubsystemStatus = com.flockyou.service.SubsystemStatus.Idle,
@@ -120,6 +142,16 @@ data class MainUiState(
     val threadingSystemState: com.flockyou.monitoring.ScannerThreadingMonitor.SystemThreadingState? = null,
     val threadingScannerStates: Map<String, com.flockyou.monitoring.ScannerThreadingMonitor.ScannerThreadState> = emptyMap(),
     val threadingAlerts: List<com.flockyou.monitoring.ScannerThreadingMonitor.ThreadingAlert> = emptyList(),
+    // Cross-detection pattern alerts
+    val correlatedThreats: List<com.flockyou.ai.correlation.CorrelatedThreat> = emptyList(),
+    val dismissedCorrelationIds: Set<String> = emptySet(),
+    // Related detection counts (detectionId -> count of related)
+    val relatedDetectionCounts: Map<String, Int> = emptyMap(),
+    // Selection mode for batch actions
+    val selectionMode: Boolean = false,
+    val selectedDetectionIds: Set<String> = emptySet(),
+    // View mode
+    val viewMode: DetectionViewMode = DetectionViewMode.TIMELINE,
     // UI settings
     val advancedMode: Boolean = false,
     // AI Analysis
@@ -158,11 +190,13 @@ class MainViewModel @Inject constructor(
     internal val torAwareHttpClient: TorAwareHttpClient,
     internal val workManager: WorkManager,
     internal val detectionAnalyzer: com.flockyou.ai.DetectionAnalyzer,
+    internal val crossDomainAnalyzer: com.flockyou.ai.correlation.CrossDomainAnalyzer,
     internal val serviceConnection: ScanningServiceConnection,  // Injected singleton
     internal val flipperScannerManager: FlipperScannerManager,  // Flipper Zero integration
     internal val flipperUiSettingsRepository: FlipperUiSettingsRepository,  // Flipper UI settings
     internal val flipperOnboardingRepository: FlipperOnboardingRepository,  // Flipper onboarding
-    internal val flipperSettingsRepository: FlipperSettingsRepository  // Flipper settings (scan modules, WIPS, etc.)
+    internal val flipperSettingsRepository: FlipperSettingsRepository,  // Flipper settings (scan modules, WIPS, etc.)
+    internal val enrichedDataCache: com.flockyou.ai.EnrichedDataCache  // Enriched detector data cache
 ) : AndroidViewModel(application) {
 
     internal val _uiState = MutableStateFlow(MainUiState())
@@ -524,6 +558,21 @@ class MainViewModel @Inject constructor(
             }
         }
 
+        // Observe cross-domain correlated threats
+        viewModelScope.launch {
+            crossDomainAnalyzer.correlatedThreats.collect { threats ->
+                _uiState.update { it.copy(correlatedThreats = threats) }
+            }
+        }
+
+        // Compute related detection counts when detections change
+        viewModelScope.launch {
+            repository.allDetections.collect { detections ->
+                val counts = computeRelatedCounts(detections)
+                _uiState.update { it.copy(relatedDetectionCounts = counts) }
+            }
+        }
+
         // Check Orbot status periodically
         viewModelScope.launch {
             while (true) {
@@ -692,6 +741,126 @@ class MainViewModel @Inject constructor(
     companion object {
         internal const val FAP_ASSET_PATH = "flipper/flock_bridge.fap"
         internal const val FAP_DEST_PATH = "/ext/apps/Tools/flock_bridge.fap"
+    }
+
+    // --- Cross-detection pattern alerts ---
+
+    fun dismissCorrelation(correlationId: String) {
+        _uiState.update {
+            it.copy(dismissedCorrelationIds = it.dismissedCorrelationIds + correlationId)
+        }
+    }
+
+    fun getVisibleCorrelatedThreats(): List<com.flockyou.ai.correlation.CorrelatedThreat> {
+        val state = _uiState.value
+        return state.correlatedThreats.filter { it.id !in state.dismissedCorrelationIds }
+    }
+
+    // --- View mode ---
+
+    fun setViewMode(mode: DetectionViewMode) {
+        _uiState.update { it.copy(viewMode = mode) }
+    }
+
+    // --- Batch/selection actions ---
+
+    fun toggleSelectionMode() {
+        _uiState.update {
+            if (it.selectionMode) {
+                // Exiting selection mode - clear selections
+                it.copy(selectionMode = false, selectedDetectionIds = emptySet())
+            } else {
+                it.copy(selectionMode = true)
+            }
+        }
+    }
+
+    fun toggleDetectionSelection(detectionId: String) {
+        _uiState.update { state ->
+            val newSelection = if (detectionId in state.selectedDetectionIds) {
+                state.selectedDetectionIds - detectionId
+            } else {
+                state.selectedDetectionIds + detectionId
+            }
+            state.copy(selectedDetectionIds = newSelection)
+        }
+    }
+
+    fun selectAllDetections(detectionIds: List<String>) {
+        _uiState.update { it.copy(selectedDetectionIds = detectionIds.toSet()) }
+    }
+
+    fun batchMarkReviewed() {
+        viewModelScope.launch {
+            val detections = _uiState.value.detections.filter {
+                it.id in _uiState.value.selectedDetectionIds
+            }
+            detections.forEach { detection ->
+                val updated = detection.copy(
+                    fpCategory = "USER_REVIEWED",
+                    fpReason = "Manually reviewed and dismissed by user",
+                    analyzedAt = System.currentTimeMillis()
+                )
+                repository.updateDetection(updated)
+            }
+            _uiState.update { it.copy(selectionMode = false, selectedDetectionIds = emptySet()) }
+        }
+    }
+
+    fun batchMarkFalsePositive() {
+        viewModelScope.launch {
+            val detections = _uiState.value.detections.filter {
+                it.id in _uiState.value.selectedDetectionIds
+            }
+            detections.forEach { detection ->
+                val updated = detection.copy(
+                    fpScore = 0.9f,
+                    fpCategory = "USER_MARKED_FP",
+                    fpReason = "Manually marked as false positive by user",
+                    analyzedAt = System.currentTimeMillis()
+                )
+                repository.updateDetection(updated)
+            }
+            _uiState.update { it.copy(selectionMode = false, selectedDetectionIds = emptySet()) }
+        }
+    }
+
+    // --- Related detection count computation ---
+
+    private fun computeRelatedCounts(detections: List<com.flockyou.data.model.Detection>): Map<String, Int> {
+        if (detections.size < 2) return emptyMap()
+        val counts = mutableMapOf<String, Int>()
+        for (detection in detections) {
+            var related = 0
+            for (other in detections) {
+                if (other.id == detection.id) continue
+                // MAC match
+                if (detection.macAddress != null && detection.macAddress == other.macAddress) {
+                    related++
+                    continue
+                }
+                // Same device type within proximity and 10 minutes
+                if (detection.deviceType == other.deviceType &&
+                    detection.protocol == other.protocol &&
+                    kotlin.math.abs(detection.timestamp - other.timestamp) < 600_000
+                ) {
+                    related++
+                }
+            }
+            if (related > 0) {
+                counts[detection.id] = related
+            }
+        }
+        return counts
+    }
+
+    // --- Enriched data access ---
+
+    /**
+     * Retrieve enriched detector data for a detection, if available in cache.
+     */
+    fun getEnrichedData(detectionId: String): com.flockyou.ai.EnrichedDetectorData? {
+        return enrichedDataCache.get(detectionId)
     }
 
     override fun onCleared() {

@@ -49,6 +49,7 @@ import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import kotlinx.coroutines.delay
+import androidx.compose.material3.OutlinedTextFieldDefaults
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class, ExperimentalLayoutApi::class)
 @Composable
@@ -477,6 +478,15 @@ fun MainScreen(
                             }
                         }
 
+                        // Compute grouped detections and visible correlations outside LazyColumn
+                        // (LazyListScope is non-composable, so remember/composables can't be called inside it)
+                        val groupedDetections = remember(filteredDetections) {
+                            groupDetectionsByTime(filteredDetections)
+                        }
+                        val visibleCorrelations = remember(uiState.correlatedThreats, uiState.dismissedCorrelationIds) {
+                            uiState.correlatedThreats.filter { it.id !in uiState.dismissedCorrelationIds }
+                        }
+
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(16.dp),
@@ -564,7 +574,38 @@ fun MainScreen(
                             }
                         }
 
-                        // FP filter toggle and section header
+                        // Search bar
+                        item(key = "search_bar") {
+                            OutlinedTextField(
+                                value = uiState.searchQuery,
+                                onValueChange = { viewModel.setSearchQuery(it) },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = { Text("Search detections...") },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Search,
+                                        contentDescription = "Search"
+                                    )
+                                },
+                                trailingIcon = {
+                                    if (uiState.searchQuery.isNotEmpty()) {
+                                        IconButton(onClick = { viewModel.setSearchQuery("") }) {
+                                            Icon(
+                                                imageVector = Icons.Default.Clear,
+                                                contentDescription = "Clear search"
+                                            )
+                                        }
+                                    }
+                                },
+                                singleLine = true,
+                                shape = RoundedCornerShape(12.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
+
+                        // Section header with sort and FP toggle
                         item(key = "section_header") {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Row(
@@ -579,32 +620,107 @@ fun MainScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
 
-                                    // FP filter toggle - always visible so users can toggle it
-                                    val fpCount = viewModel.getFalsePositiveCount()
-                                    FilterChip(
-                                        selected = !uiState.hideFalsePositives,
-                                        onClick = { viewModel.toggleHideFalsePositives() },
-                                        label = {
-                                            Text(
-                                                text = if (uiState.hideFalsePositives) {
-                                                    if (fpCount > 0) "Show FPs ($fpCount hidden)" else "FP filter on"
-                                                } else {
-                                                    "Showing all"
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        // View mode toggle (Timeline / Incidents)
+                                        if (visibleCorrelations.isNotEmpty()) {
+                                            IconButton(
+                                                onClick = {
+                                                    viewModel.setViewMode(
+                                                        if (uiState.viewMode == DetectionViewMode.TIMELINE)
+                                                            DetectionViewMode.INCIDENTS
+                                                        else
+                                                            DetectionViewMode.TIMELINE
+                                                    )
                                                 },
-                                                style = MaterialTheme.typography.labelSmall
-                                            )
-                                        },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = if (uiState.hideFalsePositives)
-                                                    Icons.Default.VisibilityOff
-                                                else
-                                                    Icons.Default.Visibility,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(16.dp)
-                                            )
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (uiState.viewMode == DetectionViewMode.INCIDENTS)
+                                                        Icons.Default.ViewTimeline
+                                                    else
+                                                        Icons.Default.Layers,
+                                                    contentDescription = "Switch to ${if (uiState.viewMode == DetectionViewMode.TIMELINE) "Incidents" else "Timeline"}",
+                                                    tint = if (uiState.viewMode == DetectionViewMode.INCIDENTS)
+                                                        MaterialTheme.colorScheme.primary
+                                                    else
+                                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
                                         }
-                                    )
+
+                                        // Sort button with dropdown
+                                        var showSortMenu by remember { mutableStateOf(false) }
+                                        Box {
+                                            IconButton(
+                                                onClick = { showSortMenu = true },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Sort,
+                                                    contentDescription = "Sort by ${uiState.sortOrder.label}",
+                                                    tint = if (uiState.sortOrder != SortOrder.NEWEST_FIRST)
+                                                        MaterialTheme.colorScheme.primary
+                                                    else
+                                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                            DropdownMenu(
+                                                expanded = showSortMenu,
+                                                onDismissRequest = { showSortMenu = false }
+                                            ) {
+                                                SortOrder.entries.forEach { order ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(order.label) },
+                                                        onClick = {
+                                                            viewModel.setSortOrder(order)
+                                                            showSortMenu = false
+                                                        },
+                                                        leadingIcon = {
+                                                            if (uiState.sortOrder == order) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Check,
+                                                                    contentDescription = "Selected",
+                                                                    tint = MaterialTheme.colorScheme.primary
+                                                                )
+                                                            }
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        // FP filter toggle
+                                        val fpCount = viewModel.getFalsePositiveCount()
+                                        FilterChip(
+                                            selected = !uiState.hideFalsePositives,
+                                            onClick = { viewModel.toggleHideFalsePositives() },
+                                            label = {
+                                                Text(
+                                                    text = if (uiState.hideFalsePositives) {
+                                                        if (fpCount > 0) "Show FPs ($fpCount hidden)" else "FP filter on"
+                                                    } else {
+                                                        "Showing all"
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = if (uiState.hideFalsePositives)
+                                                        Icons.Default.VisibilityOff
+                                                    else
+                                                        Icons.Default.Visibility,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -632,42 +748,154 @@ fun MainScreen(
                             }
                             filteredDetections.isEmpty() -> {
                                 item(key = "empty_state") {
-                                    EmptyState(
-                                        isScanning = uiState.isScanning,
-                                        onStartScanning = { viewModel.toggleScanning() }
-                                    )
+                                    if (viewModel.hasActiveFilters() && uiState.detections.isNotEmpty()) {
+                                        // Filters are hiding all results
+                                        FilteredEmptyState(
+                                            onClearFilters = { viewModel.clearFilters() }
+                                        )
+                                    } else {
+                                        // Genuinely no detections
+                                        EmptyState(
+                                            isScanning = uiState.isScanning,
+                                            onStartScanning = { viewModel.toggleScanning() }
+                                        )
+                                    }
                                 }
                             }
                             else -> {
-                                items(
-                                    items = filteredDetections,
-                                    key = { it.id }
-                                ) { detection ->
-                                    SwipeableDetectionCard(
-                                        detection = detection,
-                                        onClick = { selectedDetection = detection },
-                                        onMarkReviewed = { det ->
-                                            viewModel.markAsReviewed(det)
-                                            lastMarkedDetection = det
-                                            lastActionType = "reviewed"
-                                        },
-                                        onMarkFalsePositive = { det ->
-                                            viewModel.markAsFalsePositive(det)
-                                            lastMarkedDetection = det
-                                            lastActionType = "false_positive"
-                                        },
-                                        advancedMode = uiState.advancedMode,
-                                        isExpanded = expandedDetectionIds[detection.id] == true,
-                                        onExpandToggle = {
-                                            expandedDetectionIds[detection.id] = !(expandedDetectionIds[detection.id] ?: false)
-                                        },
-                                        onAnalyzeClick = if (viewModel.isAiAnalysisAvailable()) {
-                                            { viewModel.analyzeDetection(it) }
-                                        } else null,
-                                        isAnalyzing = uiState.analyzingDetectionId == detection.id,
-                                        onPrioritizeEnrichment = { viewModel.prioritizeEnrichment(it) },
-                                        isEnrichmentPending = prioritizedEnrichmentIds.contains(detection.id)
-                                    )
+                                // Pattern alerts banner
+                                if (visibleCorrelations.isNotEmpty()) {
+                                    item(key = "pattern_alerts") {
+                                        PatternAlertBanner(
+                                            correlatedThreats = visibleCorrelations,
+                                            onDismiss = { viewModel.dismissCorrelation(it) }
+                                        )
+                                    }
+                                }
+
+                                // Selection mode action bar
+                                if (uiState.selectionMode) {
+                                    item(key = "selection_bar") {
+                                        SelectionActionBar(
+                                            selectedCount = uiState.selectedDetectionIds.size,
+                                            totalCount = filteredDetections.size,
+                                            onSelectAll = { viewModel.selectAllDetections(filteredDetections.map { it.id }) },
+                                            onCancel = { viewModel.toggleSelectionMode() },
+                                            onMarkReviewed = { viewModel.batchMarkReviewed() },
+                                            onMarkFalsePositive = { viewModel.batchMarkFalsePositive() }
+                                        )
+                                    }
+                                }
+
+                                if (uiState.viewMode == DetectionViewMode.INCIDENTS && visibleCorrelations.isNotEmpty()) {
+                                    // Incident-grouped view: correlated threats as incident cards,
+                                    // then uncorrelated detections below
+                                    val correlatedDetectionIds = visibleCorrelations
+                                        .flatMap { it.detections.map { d -> d.id } }
+                                        .toSet()
+
+                                    // Incident cards
+                                    items(
+                                        items = visibleCorrelations,
+                                        key = { "incident_${it.id}" }
+                                    ) { threat ->
+                                        IncidentCard(
+                                            correlatedThreat = threat,
+                                            onDetectionClick = { selectedDetection = it }
+                                        )
+                                    }
+
+                                    // Uncorrelated detections header
+                                    val uncorrelated = filteredDetections.filter { it.id !in correlatedDetectionIds }
+                                    if (uncorrelated.isNotEmpty()) {
+                                        stickyHeader(key = "header_uncorrelated") {
+                                            TimeGroupHeader(
+                                                label = "Other Detections",
+                                                count = uncorrelated.size,
+                                                highestThreat = uncorrelated.maxOfOrNull { it.threatScore } ?: 0
+                                            )
+                                        }
+                                        items(
+                                            items = uncorrelated,
+                                            key = { it.id }
+                                        ) { detection ->
+                                            SwipeableDetectionCard(
+                                                detection = detection,
+                                                onClick = { selectedDetection = detection },
+                                                onMarkReviewed = { det ->
+                                                    viewModel.markAsReviewed(det)
+                                                    lastMarkedDetection = det
+                                                    lastActionType = "reviewed"
+                                                },
+                                                onMarkFalsePositive = { det ->
+                                                    viewModel.markAsFalsePositive(det)
+                                                    lastMarkedDetection = det
+                                                    lastActionType = "false_positive"
+                                                },
+                                                advancedMode = uiState.advancedMode,
+                                                isExpanded = expandedDetectionIds[detection.id] == true,
+                                                onExpandToggle = {
+                                                    expandedDetectionIds[detection.id] = !(expandedDetectionIds[detection.id] ?: false)
+                                                },
+                                                onAnalyzeClick = if (viewModel.isAiAnalysisAvailable()) {
+                                                    { viewModel.analyzeDetection(it) }
+                                                } else null,
+                                                isAnalyzing = uiState.analyzingDetectionId == detection.id,
+                                                onPrioritizeEnrichment = { viewModel.prioritizeEnrichment(it) },
+                                                isEnrichmentPending = prioritizedEnrichmentIds.contains(detection.id),
+                                                relatedCount = uiState.relatedDetectionCounts[detection.id] ?: 0,
+                                                selectionMode = uiState.selectionMode,
+                                                isSelected = detection.id in uiState.selectedDetectionIds,
+                                                onToggleSelection = { viewModel.toggleDetectionSelection(detection.id) }
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    // Time-grouped timeline view (default)
+                                    groupedDetections.forEach { (header, detections) ->
+                                        stickyHeader(key = "header_$header") {
+                                            TimeGroupHeader(
+                                                label = header,
+                                                count = detections.size,
+                                                highestThreat = detections.maxOfOrNull { it.threatScore } ?: 0
+                                            )
+                                        }
+
+                                        items(
+                                            items = detections,
+                                            key = { it.id }
+                                        ) { detection ->
+                                            SwipeableDetectionCard(
+                                                detection = detection,
+                                                onClick = { selectedDetection = detection },
+                                                onMarkReviewed = { det ->
+                                                    viewModel.markAsReviewed(det)
+                                                    lastMarkedDetection = det
+                                                    lastActionType = "reviewed"
+                                                },
+                                                onMarkFalsePositive = { det ->
+                                                    viewModel.markAsFalsePositive(det)
+                                                    lastMarkedDetection = det
+                                                    lastActionType = "false_positive"
+                                                },
+                                                advancedMode = uiState.advancedMode,
+                                                isExpanded = expandedDetectionIds[detection.id] == true,
+                                                onExpandToggle = {
+                                                    expandedDetectionIds[detection.id] = !(expandedDetectionIds[detection.id] ?: false)
+                                                },
+                                                onAnalyzeClick = if (viewModel.isAiAnalysisAvailable()) {
+                                                    { viewModel.analyzeDetection(it) }
+                                                } else null,
+                                                isAnalyzing = uiState.analyzingDetectionId == detection.id,
+                                                onPrioritizeEnrichment = { viewModel.prioritizeEnrichment(it) },
+                                                isEnrichmentPending = prioritizedEnrichmentIds.contains(detection.id),
+                                                relatedCount = uiState.relatedDetectionCounts[detection.id] ?: 0,
+                                                selectionMode = uiState.selectionMode,
+                                                isSelected = detection.id in uiState.selectedDetectionIds,
+                                                onToggleSelection = { viewModel.toggleDetectionSelection(detection.id) }
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -853,6 +1081,7 @@ fun MainScreen(
 
         DetectionDetailSheet(
             detection = detection,
+            enrichedData = viewModel.getEnrichedData(detection.id),
             privilegeMode = viewModel.privilegeMode,
             onDismiss = {
                 viewModel.clearRelatedDetections()
@@ -923,692 +1152,6 @@ fun MainScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun CellularTabContent(
-    modifier: Modifier = Modifier,
-    cellStatus: CellularMonitor.CellStatus?,
-    cellularStatus: com.flockyou.service.SubsystemStatus,
-    cellularAnomalies: List<CellularMonitor.CellularAnomaly>,
-    seenCellTowers: List<CellularMonitor.SeenCellTower>,
-    cellularEvents: List<CellularMonitor.CellularEvent>,
-    satelliteState: com.flockyou.monitoring.SatelliteMonitor.SatelliteConnectionState?,
-    satelliteAnomalies: List<com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly>,
-    isScanning: Boolean,
-    onToggleScan: () -> Unit,
-    onClearCellularHistory: () -> Unit,
-    onClearSatelliteHistory: () -> Unit
-) {
-    val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-    var showTimelineSheet by remember { mutableStateOf(false) }
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
-    // Timeline Bottom Sheet
-    if (showTimelineSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showTimelineSheet = false },
-            sheetState = sheetState,
-            modifier = Modifier.fillMaxHeight(0.9f)
-        ) {
-            CellularTimelineScreen(
-                events = cellularEvents,
-                seenTowers = seenCellTowers,
-                cellStatus = cellStatus,
-                onClearHistory = onClearCellularHistory
-            )
-        }
-    }
-
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Status card
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = when (cellularStatus) {
-                        is com.flockyou.service.SubsystemStatus.Active ->
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                        is com.flockyou.service.SubsystemStatus.PermissionDenied ->
-                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
-                        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    }
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.CellTower,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Cellular Monitoring",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Button(
-                            onClick = onToggleScan,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isScanning)
-                                    MaterialTheme.colorScheme.error
-                                else
-                                    MaterialTheme.colorScheme.primary
-                            )
-                        ) {
-                            Text(if (isScanning) "Stop" else "Start")
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = when (cellularStatus) {
-                            is com.flockyou.service.SubsystemStatus.Active -> StatusActive
-                            is com.flockyou.service.SubsystemStatus.PermissionDenied -> StatusError
-                            else -> StatusInactive
-                        }
-                    ) {
-                        Text(
-                            text = when (cellularStatus) {
-                                is com.flockyou.service.SubsystemStatus.Active -> "\uD83D\uDFE2 Active"
-                                is com.flockyou.service.SubsystemStatus.PermissionDenied -> "\u26D4 No Permission"
-                                is com.flockyou.service.SubsystemStatus.Error -> "\u26A0\uFE0F Error"
-                                else -> "\u26AA Idle"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-
-                    if (cellularStatus is com.flockyou.service.SubsystemStatus.PermissionDenied) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "\u26A0\uFE0F READ_PHONE_STATE permission required for IMSI catcher detection",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        PermissionRecoveryButton()
-                    }
-                }
-            }
-        }
-
-        // Current cell info
-        if (cellStatus != null) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "\uD83D\uDCF6 Current Cell Tower",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = when (cellStatus.networkGeneration) {
-                                    "5G" -> Network5G
-                                    "4G" -> Network4G
-                                    "3G" -> Network3G
-                                    "2G" -> Network2G
-                                    else -> StatusInactive
-                                }
-                            ) {
-                                Text(
-                                    text = cellStatus.networkGeneration,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = cellStatus.networkType,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                cellStatus.operator?.let { op ->
-                                    Text(
-                                        text = op,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text(
-                                    text = "${cellStatus.signalStrength} dBm",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "${cellStatus.signalBars}/4 bars",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Cell ID", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(cellStatus.cellId, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                            }
-                            cellStatus.mcc?.let {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("MCC", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                                }
-                            }
-                            cellStatus.mnc?.let {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("MNC", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Anomalies section
-        if (cellularAnomalies.isNotEmpty()) {
-            item {
-                Text(
-                    text = "\u26A0\uFE0F Detected Anomalies (${cellularAnomalies.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-
-            items(
-                items = cellularAnomalies.take(10),
-                key = { it.id }
-            ) { anomaly ->
-                CellularAnomalyCard(anomaly = anomaly, dateFormat = dateFormat)
-            }
-        }
-
-        // Cell tower history
-        if (seenCellTowers.isNotEmpty()) {
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "\uD83D\uDDFC Cell Tower History (${seenCellTowers.size})",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { showTimelineSheet = true }) {
-                            Icon(
-                                Icons.Default.Timeline,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text("Timeline")
-                        }
-                        TextButton(onClick = onClearCellularHistory) {
-                            Text("Clear")
-                        }
-                    }
-                }
-            }
-
-            items(
-                items = seenCellTowers.take(5),
-                key = { "${it.mcc}-${it.mnc}-${it.lac}-${it.cellId}" }
-            ) { tower ->
-                CellTowerHistoryCard(tower = tower, dateFormat = dateFormat)
-            }
-
-            // Show "View All" if there are more towers
-            if (seenCellTowers.size > 5) {
-                item {
-                    TextButton(
-                        onClick = { showTimelineSheet = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("View all ${seenCellTowers.size} towers \u2192")
-                    }
-                }
-            }
-        }
-
-        // Satellite status card
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = when {
-                        satelliteState?.isConnected == true -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                    }
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Default.SatelliteAlt,
-                                contentDescription = null,
-                                tint = if (satelliteState?.isConnected == true)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "\uD83D\uDEF0\uFE0F Satellite Status",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                val satState = satelliteState
-                                Text(
-                                    text = when {
-                                        satState?.isConnected == true ->
-                                            "Connected: ${satState.connectionType.name.replace("_", " ")}"
-                                        isScanning -> "Monitoring"
-                                        else -> "Not connected"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        if (satelliteState?.isConnected == true) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = StatusActive.copy(alpha = 0.2f)
-                            ) {
-                                Text(
-                                    text = "CONNECTED",
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = StatusActive,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-
-                    satelliteState?.let { satState ->
-                        if (satState.isConnected && satState.provider != com.flockyou.monitoring.SatelliteMonitor.SatelliteProvider.UNKNOWN) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Provider: ${satState.provider.name} | Network: ${satState.networkName ?: "Unknown"}",
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Satellite anomalies
-        if (satelliteAnomalies.isNotEmpty()) {
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "\uD83D\uDEF0\uFE0F Satellite Anomalies (${satelliteAnomalies.size})",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                    TextButton(onClick = onClearSatelliteHistory) {
-                        Text("Clear")
-                    }
-                }
-            }
-
-            items(
-                items = satelliteAnomalies.take(10),
-                key = { "${it.type}-${it.timestamp}-${it.hashCode()}" }
-            ) { anomaly ->
-                SatelliteAnomalyHistoryCard(anomaly = anomaly, dateFormat = dateFormat)
-            }
-        }
-
-        // Info card
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "\u2139\uFE0F About IMSI Catcher Detection",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "This monitors for signs of cell site simulators (StingRay, Hailstorm, etc.):\n" +
-                            "\u2022 Encryption downgrades (4G/5G \u2192 2G)\n" +
-                            "\u2022 Suspicious network identifiers\n" +
-                            "\u2022 Unexpected cell tower changes\n" +
-                            "\u2022 Signal anomalies",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CellularAnomalyCard(
-    anomaly: CellularMonitor.CellularAnomaly,
-    dateFormat: SimpleDateFormat
-) {
-    val severityColor = when (anomaly.severity) {
-        ThreatLevel.CRITICAL -> ThreatCritical
-        ThreatLevel.HIGH -> ThreatHigh
-        ThreatLevel.MEDIUM -> ThreatMedium
-        else -> StatusInactive
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = severityColor.copy(alpha = 0.15f))
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(anomaly.type.emoji, style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = anomaly.type.displayName,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = severityColor
-                    )
-                }
-                Surface(
-                    shape = RoundedCornerShape(4.dp),
-                    color = severityColor
-                ) {
-                    Text(
-                        text = anomaly.severity.displayName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = anomaly.description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = dateFormat.format(Date(anomaly.timestamp)),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "${anomaly.signalStrength} dBm \u2022 ${anomaly.networkType}",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun CellTowerHistoryCard(
-    tower: CellularMonitor.SeenCellTower,
-    dateFormat: SimpleDateFormat
-) {
-    var expanded by remember { mutableStateOf(false) }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = { expanded = !expanded }
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = when (tower.networkGeneration) {
-                            "5G" -> Network5G
-                            "4G" -> Network4G
-                            "3G" -> Network3G
-                            "2G" -> Network2G
-                            else -> StatusInactive
-                        }
-                    ) {
-                        Text(
-                            text = tower.networkGeneration,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = tower.operator ?: "Unknown",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "Cell ${tower.cellId}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = "${tower.lastSignal} dBm",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "${tower.seenCount}x",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            AnimatedVisibility(visible = expanded) {
-                Column {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        tower.mcc?.let {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("MCC", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                            }
-                        }
-                        tower.mnc?.let {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("MNC", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                            }
-                        }
-                        tower.lac?.let {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("LAC", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(it.toString(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "First: ${dateFormat.format(Date(tower.firstSeen))}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "Last: ${dateFormat.format(Date(tower.lastSeen))}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SatelliteAnomalyHistoryCard(
-    anomaly: com.flockyou.monitoring.SatelliteMonitor.SatelliteAnomaly,
-    dateFormat: SimpleDateFormat
-) {
-    val severityColor = when (anomaly.severity) {
-        com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.CRITICAL -> ThreatCritical
-        com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.HIGH -> ThreatHigh
-        com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.MEDIUM -> ThreatMedium
-        com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.LOW -> ThreatLow
-        com.flockyou.monitoring.SatelliteMonitor.AnomalySeverity.INFO -> ThreatInfo
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = severityColor.copy(alpha = 0.1f))
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.SatelliteAlt,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = severityColor
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = anomaly.type.name.replace("_", " "),
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = dateFormat.format(Date(anomaly.timestamp)),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                Surface(
-                    shape = RoundedCornerShape(4.dp),
-                    color = severityColor.copy(alpha = 0.2f)
-                ) {
-                    Text(
-                        text = anomaly.severity.name,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = severityColor,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = anomaly.description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
 
 /**
  * Detection modules grid with quick access to specialized detection screens
@@ -1778,32 +1321,142 @@ private fun DetectionModuleCard(
  * Permission recovery button that opens app settings
  * Used when a permission is denied and needs to be granted manually
  */
-@Composable
-fun PermissionRecoveryButton(
-    modifier: Modifier = Modifier,
-    text: String = "Grant Permission"
-) {
-    val context = LocalContext.current
 
-    OutlinedButton(
-        onClick = {
-            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = Uri.fromParts("package", context.packageName, null)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        },
-        modifier = modifier,
-        colors = ButtonDefaults.outlinedButtonColors(
-            contentColor = MaterialTheme.colorScheme.primary
-        )
+// ========== Time-Grouped Detection Helpers ==========
+
+/**
+ * Groups detections into time buckets for sticky headers.
+ */
+internal fun groupDetectionsByTime(detections: List<Detection>): List<Pair<String, List<Detection>>> {
+    if (detections.isEmpty()) return emptyList()
+    val now = System.currentTimeMillis()
+    val fiveMinAgo = now - 5 * 60_000
+    val oneHourAgo = now - 60 * 60_000
+    val todayStart = Calendar.getInstance().apply {
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+    val yesterdayStart = todayStart - 86_400_000
+    val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
+
+    val groups = linkedMapOf<String, MutableList<Detection>>()
+    for (detection in detections) {
+        val key = when {
+            detection.timestamp >= fiveMinAgo -> "Just Now"
+            detection.timestamp >= oneHourAgo -> "Last Hour"
+            detection.timestamp >= todayStart -> "Today"
+            detection.timestamp >= yesterdayStart -> "Yesterday"
+            else -> dateFormat.format(Date(detection.timestamp))
+        }
+        groups.getOrPut(key) { mutableListOf() }.add(detection)
+    }
+    return groups.map { (k, v) -> k to v.toList() }
+}
+
+/**
+ * Sticky header for time-grouped detection list.
+ */
+@Composable
+internal fun TimeGroupHeader(
+    label: String,
+    count: Int,
+    highestThreat: Int
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.background.copy(alpha = 0.95f)
     ) {
-        Icon(
-            imageVector = Icons.Default.Settings,
-            contentDescription = null,
-            modifier = Modifier.size(18.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(text)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "$count",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            )
+            if (highestThreat >= 70) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .background(
+                            if (highestThreat >= 90) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.tertiary,
+                            shape = RoundedCornerShape(4.dp)
+                        )
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Bottom action bar shown when batch selection mode is active.
+ */
+@Composable
+internal fun SelectionActionBar(
+    selectedCount: Int,
+    totalCount: Int,
+    onSelectAll: () -> Unit,
+    onCancel: () -> Unit,
+    onMarkReviewed: () -> Unit,
+    onMarkFalsePositive: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primaryContainer
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "$selectedCount of $totalCount selected",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onSelectAll) { Text("Select All") }
+                    TextButton(onClick = onCancel) { Text("Cancel") }
+                }
+            }
+            if (selectedCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onMarkReviewed,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Mark Reviewed")
+                    }
+                    OutlinedButton(
+                        onClick = onMarkFalsePositive,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.VerifiedUser, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Mark FP")
+                    }
+                }
+            }
+        }
     }
 }

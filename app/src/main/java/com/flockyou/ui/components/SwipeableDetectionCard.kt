@@ -10,6 +10,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -21,6 +23,45 @@ import com.flockyou.data.model.*
 import com.flockyou.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
+
+/**
+ * Parse matched patterns JSON string into human-readable label/value pairs.
+ * Patterns are stored as JSON arrays like ["MAC_PREFIX:Flock","SSID_REGEX:FLOCK-*"]
+ */
+fun parseMatchedPatterns(patterns: String?): List<Pair<String, String>> {
+    if (patterns.isNullOrBlank() || patterns == "[]" || patterns == "null") return emptyList()
+    return try {
+        // Strip JSON array brackets and split
+        val cleaned = patterns.trimStart('[').trimEnd(']')
+        cleaned.split(",").mapNotNull { entry ->
+            val trimmed = entry.trim().trim('"')
+            if (trimmed.isBlank()) return@mapNotNull null
+            val colonIndex = trimmed.indexOf(':')
+            if (colonIndex > 0) {
+                val type = trimmed.substring(0, colonIndex)
+                val value = trimmed.substring(colonIndex + 1)
+                val humanType = when (type.uppercase()) {
+                    "MAC_PREFIX", "MAC_OUI" -> "MAC OUI"
+                    "SSID_REGEX", "SSID_PATTERN" -> "SSID"
+                    "BLE_NAME", "BLE_NAME_REGEX" -> "BLE Name"
+                    "SERVICE_UUID", "BLE_UUID" -> "Service UUID"
+                    "MANUFACTURER_ID", "MFR_ID" -> "Manufacturer"
+                    "ADVERTISING_RATE" -> "Ad Rate"
+                    "BEHAVIORAL" -> "Behavior"
+                    "TRACKER_SPEC" -> "Tracker"
+                    "RAVEN_UUID" -> "Raven UUID"
+                    else -> type.replace("_", " ").lowercase()
+                        .replaceFirstChar { it.uppercase() }
+                }
+                Pair(humanType, value)
+            } else {
+                Pair("Pattern", trimmed)
+            }
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
 
 /**
  * Expandable detection card with action buttons for marking reviewed/false positive.
@@ -46,6 +87,11 @@ fun SwipeableDetectionCard(
     isAnalyzing: Boolean = false,
     onPrioritizeEnrichment: ((Detection) -> Unit)? = null,
     isEnrichmentPending: Boolean = false,
+    relatedCount: Int = 0,
+    isSelected: Boolean = false,
+    selectionMode: Boolean = false,
+    onToggleSelection: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
     ouiLookupViewModel: OuiLookupViewModel = hiltViewModel()
 ) {
     val threatColor = detection.threatLevel.toColor()
@@ -67,19 +113,21 @@ fun SwipeableDetectionCard(
     Card(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
+            containerColor = if (isSelected)
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+            else
+                MaterialTheme.colorScheme.surface
         ),
         onClick = {
-            if (advancedMode) {
+            if (selectionMode && onToggleSelection != null) {
+                onToggleSelection()
+            } else if (advancedMode) {
                 if (isExpanded) {
-                    // Already expanded, open full details
                     onClick()
                 } else {
-                    // First tap expands details
                     onExpandToggle()
                 }
             } else {
-                // In simple mode, tap opens detail sheet
                 onClick()
             }
         }
@@ -234,6 +282,10 @@ fun SwipeableDetectionCard(
                                 dateFormat = dateFormat
                             )
 
+                            // Threat score breakdown
+                            Spacer(modifier = Modifier.height(8.dp))
+                            ThreatScoreBreakdown(detection = detection)
+
                             // Enrichment status
                             EnrichmentStatusRowPublic(
                                 detection = detection,
@@ -294,6 +346,55 @@ fun SwipeableDetectionCard(
 
                     // Non-expanded: show quick metadata in simple mode
                     if (!isExpanded && !advancedMode) {
+                        // Show confirmed threat badge
+                        if (detection.confirmedThreat) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(RoundedCornerShape(3.dp))
+                                            .background(MaterialTheme.colorScheme.error)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "CONFIRMED",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+
+                        // Show user note if present
+                        detection.userNote?.let { note ->
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.StickyNote2,
+                                    contentDescription = "User note",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = note,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
                         // Show seen count if > 1
                         if (detection.seenCount > 1) {
                             Spacer(modifier = Modifier.height(4.dp))
@@ -310,6 +411,58 @@ fun SwipeableDetectionCard(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+
+                                // Related detection count chip
+                                if (relatedCount > 0) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Link,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                modifier = Modifier.size(10.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(2.dp))
+                                            Text(
+                                                text = "$relatedCount related",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (relatedCount > 0) {
+                            // Show related count even without seen count
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Link,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(2.dp))
+                                    Text(
+                                        text = "$relatedCount related",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
                             }
                         }
                     }
@@ -395,10 +548,35 @@ private fun ExpandedTechnicalDetails(
                 }
             }
 
-            // Matched patterns
-            detection.matchedPatterns?.let { patterns ->
-                if (patterns.isNotEmpty() && patterns != "[]") {
-                    DetailRow(label = "Matched Patterns", value = patterns, maxLines = 2)
+            // Matched patterns as human-readable chips
+            val parsedPatterns = remember(detection.matchedPatterns) {
+                parseMatchedPatterns(detection.matchedPatterns)
+            }
+            if (parsedPatterns.isNotEmpty()) {
+                Text(
+                    text = "Matched Patterns:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    parsedPatterns.forEach { (type, value) ->
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                        ) {
+                            Text(
+                                text = "$type: $value",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 }
             }
 

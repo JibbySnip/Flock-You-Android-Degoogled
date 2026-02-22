@@ -86,10 +86,10 @@ private fun EnrichmentStatusRow(
                     detection.fpReason?.let { reason ->
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "\u2022 ${reason.take(40)}${if (reason.length > 40) "..." else ""}",
+                            text = "\u2022 $reason",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f),
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )

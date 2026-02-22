@@ -9,6 +9,14 @@ import kotlinx.coroutines.flow.update
 
 // ========== Filter / Sort Logic (extension functions on MainViewModel) ==========
 
+fun MainViewModel.setSortOrder(order: SortOrder) {
+    _uiState.update { it.copy(sortOrder = order) }
+}
+
+fun MainViewModel.setSearchQuery(query: String) {
+    _uiState.update { it.copy(searchQuery = query) }
+}
+
 fun MainViewModel.setThreatFilter(threatLevel: ThreatLevel?) {
     _uiState.update { it.copy(filterThreatLevel = threatLevel) }
 }
@@ -45,9 +53,24 @@ fun MainViewModel.clearFilters() {
             filterCustomStartTime = null,
             filterCustomEndTime = null,
             filterSignalStrength = emptySet(),
-            filterActiveOnly = false
+            filterActiveOnly = false,
+            searchQuery = ""
         )
     }
+}
+
+/**
+ * Returns true if any filters (excluding sort order) are active.
+ */
+fun MainViewModel.hasActiveFilters(): Boolean {
+    val state = _uiState.value
+    return state.filterThreatLevel != null ||
+        state.filterDeviceTypes.isNotEmpty() ||
+        state.filterProtocols.isNotEmpty() ||
+        state.filterTimeRange != TimeRange.ALL_TIME ||
+        state.filterSignalStrength.isNotEmpty() ||
+        state.filterActiveOnly ||
+        state.searchQuery.isNotBlank()
 }
 
 // Protocol filter methods
@@ -145,7 +168,7 @@ fun MainViewModel.getFalsePositiveCount(): Int {
 
 fun MainViewModel.getFilteredDetections(): List<Detection> {
     val state = _uiState.value
-    return state.detections.filter { detection ->
+    val filtered = state.detections.filter { detection ->
         // 1. FP filter - hide detections flagged as false positives
         val fpPass = if (state.hideFalsePositives) {
             val fpScore = detection.fpScore ?: 0f
@@ -195,6 +218,19 @@ fun MainViewModel.getFilteredDetections(): List<Detection> {
         // 7. Active Only filter
         val activePass = !state.filterActiveOnly || detection.isActive
 
+        // 8. Search query filter
+        val searchPass = if (state.searchQuery.isBlank()) {
+            true
+        } else {
+            val query = state.searchQuery.lowercase()
+            detection.deviceType.displayName.lowercase().contains(query) ||
+                (detection.macAddress?.lowercase()?.contains(query) == true) ||
+                (detection.ssid?.lowercase()?.contains(query) == true) ||
+                (detection.deviceName?.lowercase()?.contains(query) == true) ||
+                (detection.manufacturer?.lowercase()?.contains(query) == true) ||
+                (detection.userNote?.lowercase()?.contains(query) == true)
+        }
+
         // Combine threat+type with AND/OR logic (existing behavior)
         val threatTypePass = if (state.filterMatchAll) {
             // AND: both conditions must match
@@ -210,7 +246,16 @@ fun MainViewModel.getFilteredDetections(): List<Detection> {
         }
 
         // All other filters are always AND-ed together
-        fpPass && threatTypePass && protocolPass && timePass && signalPass && activePass
+        fpPass && threatTypePass && protocolPass && timePass && signalPass && activePass && searchPass
+    }
+
+    // Apply sorting
+    return when (state.sortOrder) {
+        SortOrder.NEWEST_FIRST -> filtered.sortedByDescending { it.timestamp }
+        SortOrder.OLDEST_FIRST -> filtered.sortedBy { it.timestamp }
+        SortOrder.THREAT_SCORE_DESC -> filtered.sortedByDescending { it.threatScore }
+        SortOrder.SIGNAL_STRENGTH_DESC -> filtered.sortedByDescending { it.rssi }
+        SortOrder.SEEN_COUNT_DESC -> filtered.sortedByDescending { it.seenCount }
     }
 }
 
