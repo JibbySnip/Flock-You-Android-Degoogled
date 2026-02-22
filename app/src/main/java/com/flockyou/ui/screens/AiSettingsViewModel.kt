@@ -9,6 +9,7 @@ import com.flockyou.ai.DetectionAnalyzer
 import com.flockyou.data.AiModel
 import com.flockyou.data.AiModelStatus
 import com.flockyou.data.AiSettings
+import com.flockyou.data.ModelFormat
 import com.flockyou.data.AiSettingsRepository
 import com.flockyou.data.AnalysisFeedback
 import com.flockyou.data.FeedbackType
@@ -207,6 +208,23 @@ class AiSettingsViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Reset MediaPipe crash tracking and health state.
+     * Re-enables MediaPipe if it was disabled due to repeated crashes.
+     */
+    fun resetMediaPipeHealth() {
+        viewModelScope.launch {
+            detectionAnalyzer.resetMediaPipeHealth()
+            // Re-initialize to try MediaPipe again
+            detectionAnalyzer.initializeModel()
+            Toast.makeText(
+                application,
+                "MediaPipe reset - retrying initialization",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
     fun selectModelForDownload(model: AiModel) {
         _selectedModelForDownload.value = model
     }
@@ -251,9 +269,16 @@ class AiSettingsViewModel @Inject constructor(
 
                 if (success) {
                     Log.i(TAG, "Download succeeded for ${model.displayName}, enabling AI and initializing...")
+                    // Set engine preference to match the downloaded model
+                    val engineId = when (model.modelFormat) {
+                        ModelFormat.TASK -> "mediapipe"
+                        ModelFormat.MLKIT_GENAI, ModelFormat.AICORE -> "gemini-nano"
+                        ModelFormat.NONE -> "rule-based"
+                    }
+                    aiSettingsRepository.setPreferredEngine(engineId)
                     // Enable AI analysis after successful download
                     aiSettingsRepository.setEnabled(true)
-                    Log.d(TAG, "AI enabled, now calling initializeModel()...")
+                    Log.d(TAG, "AI enabled with engine=$engineId, now calling initializeModel()...")
                     Toast.makeText(
                         application,
                         "${model.displayName} ready",
@@ -307,6 +332,15 @@ class AiSettingsViewModel @Inject constructor(
 
     fun selectModel(model: AiModel) {
         viewModelScope.launch {
+            // Coordinate engine preference with model selection so the correct
+            // engine is used during initialization
+            val engineId = when (model.modelFormat) {
+                ModelFormat.TASK -> "mediapipe"
+                ModelFormat.MLKIT_GENAI, ModelFormat.AICORE -> "gemini-nano"
+                ModelFormat.NONE -> "rule-based"
+            }
+            aiSettingsRepository.setPreferredEngine(engineId)
+
             val success = detectionAnalyzer.selectModel(model.id)
             if (success) {
                 Toast.makeText(
@@ -461,6 +495,13 @@ class AiSettingsViewModel @Inject constructor(
                 }
 
                 if (success) {
+                    // Set engine preference to match the imported model
+                    val engineId = when (model.modelFormat) {
+                        ModelFormat.TASK -> "mediapipe"
+                        ModelFormat.MLKIT_GENAI, ModelFormat.AICORE -> "gemini-nano"
+                        ModelFormat.NONE -> "rule-based"
+                    }
+                    aiSettingsRepository.setPreferredEngine(engineId)
                     // Enable AI analysis after successful import
                     aiSettingsRepository.setEnabled(true)
                     Toast.makeText(

@@ -1884,4 +1884,15 @@ What is an IMSI catcher? Reply in one sentence.
      * Expose Gemini Nano download progress flow for UI observation.
      */
     val geminiNanoDownloadProgress: StateFlow<Int> = geminiNanoClient.downloadProgress
+
+    /**
+     * Reset MediaPipe health tracking and crash counter.
+     * Call this when the user wants to re-enable MediaPipe after crashes disabled it.
+     */
+    suspend fun resetMediaPipeHealth() {
+        mediaPipeLlmClient.resetCrashTracking()
+        mediaPipeLlmClient.resetGpuFailure()
+        llmEngineManager.resetEngineHealth(LlmEngine.MEDIAPIPE)
+        Log.i(TAG, "MediaPipe health and crash tracking reset")
+    }
 }

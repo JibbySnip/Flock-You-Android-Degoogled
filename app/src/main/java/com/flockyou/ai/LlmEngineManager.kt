@@ -75,6 +75,9 @@ class LlmEngineManager @Inject constructor(
     // Track the currently loaded model (for MediaPipe)
     private var _currentModel: AiModel = AiModel.RULE_BASED
 
+    // Track user's explicit engine preference so syncActiveEngine() respects it
+    private var _userEnginePreference = LlmEnginePreference.AUTO
+
     init {
         // Initialize health tracking for all engines
         LlmEngine.entries.forEach { engine ->
@@ -104,6 +107,9 @@ class LlmEngineManager @Inject constructor(
         // Parse the engine preference
         val enginePreference = LlmEnginePreference.entries.find { it.id == settings.preferredEngine }
             ?: LlmEnginePreference.AUTO
+
+        // Store user preference so syncActiveEngine() won't override it
+        _userEnginePreference = enginePreference
 
         // Determine the engine based on user preference
         val initResult = when (enginePreference) {
@@ -324,29 +330,60 @@ class LlmEngineManager @Inject constructor(
      * Sync the active engine to the best available one.
      * Call this before analysis to ensure we use the best engine that's ready.
      * This handles the case where an engine becomes ready after initial initialization.
+     *
+     * IMPORTANT: Respects the user's explicit engine preference. Only upgrades
+     * engines automatically in AUTO mode. When the user explicitly selected an
+     * engine, only allows recovery from RULE_BASED back to their chosen engine.
      */
     fun syncActiveEngine() {
         val geminiReady = geminiNanoClient.isReady()
         val mediaPipeReady = mediaPipeLlmClient.isReady()
         val currentActive = _activeEngine.value
 
-        Log.d(TAG, "syncActiveEngine: geminiReady=$geminiReady, mediaPipeReady=$mediaPipeReady, current=$currentActive")
+        Log.d(TAG, "syncActiveEngine: geminiReady=$geminiReady, mediaPipeReady=$mediaPipeReady, current=$currentActive, userPref=$_userEnginePreference")
 
-        // Upgrade to better engine if available
-        when {
-            geminiReady && currentActive != LlmEngine.GEMINI_NANO -> {
-                Log.i(TAG, "Upgrading active engine from $currentActive to GEMINI_NANO")
-                _activeEngine.value = LlmEngine.GEMINI_NANO
-                _currentModel = AiModel.GEMINI_NANO
-                _engineStatus.value = EngineStatus.Ready(LlmEngine.GEMINI_NANO)
-            }
-            mediaPipeReady && currentActive == LlmEngine.RULE_BASED -> {
-                Log.i(TAG, "Upgrading active engine from RULE_BASED to MEDIAPIPE")
-                _activeEngine.value = LlmEngine.MEDIAPIPE
-                if (_currentModel == AiModel.RULE_BASED) {
-                    _currentModel = AiModel.GEMMA3_1B
+        when (_userEnginePreference) {
+            LlmEnginePreference.AUTO -> {
+                // Auto mode: prefer the best available engine
+                when {
+                    geminiReady && currentActive != LlmEngine.GEMINI_NANO -> {
+                        Log.i(TAG, "AUTO: Upgrading active engine from $currentActive to GEMINI_NANO")
+                        _activeEngine.value = LlmEngine.GEMINI_NANO
+                        _currentModel = AiModel.GEMINI_NANO
+                        _engineStatus.value = EngineStatus.Ready(LlmEngine.GEMINI_NANO)
+                    }
+                    mediaPipeReady && currentActive == LlmEngine.RULE_BASED -> {
+                        Log.i(TAG, "AUTO: Upgrading active engine from RULE_BASED to MEDIAPIPE")
+                        _activeEngine.value = LlmEngine.MEDIAPIPE
+                        if (_currentModel == AiModel.RULE_BASED) {
+                            _currentModel = AiModel.GEMMA3_1B
+                        }
+                        _engineStatus.value = EngineStatus.Ready(LlmEngine.MEDIAPIPE)
+                    }
                 }
-                _engineStatus.value = EngineStatus.Ready(LlmEngine.MEDIAPIPE)
+            }
+            LlmEnginePreference.MEDIAPIPE -> {
+                // User explicitly selected MediaPipe - only recover from RULE_BASED
+                if (mediaPipeReady && currentActive == LlmEngine.RULE_BASED) {
+                    Log.i(TAG, "User selected MediaPipe: recovering from RULE_BASED")
+                    _activeEngine.value = LlmEngine.MEDIAPIPE
+                    if (_currentModel == AiModel.RULE_BASED) {
+                        _currentModel = AiModel.GEMMA3_1B
+                    }
+                    _engineStatus.value = EngineStatus.Ready(LlmEngine.MEDIAPIPE)
+                }
+            }
+            LlmEnginePreference.GEMINI_NANO -> {
+                // User explicitly selected Gemini Nano - only recover from RULE_BASED
+                if (geminiReady && currentActive == LlmEngine.RULE_BASED) {
+                    Log.i(TAG, "User selected Gemini Nano: recovering from RULE_BASED")
+                    _activeEngine.value = LlmEngine.GEMINI_NANO
+                    _currentModel = AiModel.GEMINI_NANO
+                    _engineStatus.value = EngineStatus.Ready(LlmEngine.GEMINI_NANO)
+                }
+            }
+            LlmEnginePreference.RULE_BASED -> {
+                // User explicitly selected rule-based - never upgrade
             }
         }
     }
@@ -403,10 +440,15 @@ class LlmEngineManager @Inject constructor(
                         Log.d(TAG, "    Result: success=${analysisResult?.success}, error=${analysisResult?.error}")
                         if (analysisResult != null && analysisResult.success) {
                             Log.i(TAG, "Fallback to $engine succeeded!")
-                            // Update active engine if fallback succeeded with a better engine
+                            // Only permanently switch active engine in AUTO mode.
+                            // When user explicitly selected an engine, use fallback for this request only.
                             if (engine != LlmEngine.RULE_BASED && engine != currentEngine) {
-                                Log.i(TAG, "Updating active engine to $engine after successful fallback")
-                                _activeEngine.value = engine
+                                if (_userEnginePreference == LlmEnginePreference.AUTO) {
+                                    Log.i(TAG, "AUTO mode: Updating active engine to $engine after successful fallback")
+                                    _activeEngine.value = engine
+                                } else {
+                                    Log.i(TAG, "User selected ${_userEnginePreference.displayName}, using $engine for this request only")
+                                }
                             }
                             break
                         }
@@ -668,6 +710,7 @@ class LlmEngineManager @Inject constructor(
         _engineStatus.value = EngineStatus.NotInitialized
         _activeEngine.value = LlmEngine.RULE_BASED
         _currentModel = AiModel.RULE_BASED
+        _userEnginePreference = LlmEnginePreference.AUTO
     }
 
     /**
@@ -680,6 +723,7 @@ class LlmEngineManager @Inject constructor(
         _engineStatus.value = EngineStatus.NotInitialized
         _activeEngine.value = LlmEngine.RULE_BASED
         _currentModel = AiModel.RULE_BASED
+        _userEnginePreference = LlmEnginePreference.AUTO
     }
 }
 

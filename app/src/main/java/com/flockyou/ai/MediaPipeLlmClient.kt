@@ -33,7 +33,7 @@ class MediaPipeLlmClient @Inject constructor(
 ) {
     companion object {
         private const val TAG = "MediaPipeLlmClient"
-        private const val MAX_TOKENS = 512
+        private const val MAX_TOKENS = 256 // Reduced from 512 to minimize detokenizer crash window
         private const val INFERENCE_TIMEOUT_MS = 60_000L // 60 second timeout for inference
         private const val INIT_TIMEOUT_MS = 30_000L // 30 second timeout for initialization
         private const val PREFS_NAME = "mediapipe_llm_prefs"
@@ -42,9 +42,9 @@ class MediaPipeLlmClient @Inject constructor(
         private const val KEY_INFERENCE_IN_PROGRESS = "inference_in_progress"
         private const val KEY_INFERENCE_CRASHED = "inference_crashed"
         private const val KEY_CRASH_COUNT = "inference_crash_count"
-        private const val MAX_CRASH_COUNT = 2 // Disable after 2 crashes
+        private const val MAX_CRASH_COUNT = 5 // Disable after 5 crashes (raised from 2; native crashes are sometimes transient)
         private const val MAX_CONSECUTIVE_ERRORS = 3 // Recreate session after this many errors
-        private const val MAX_PROMPT_LENGTH = 2048 // Limit prompt length to avoid tokenizer issues
+        private const val MAX_PROMPT_LENGTH = 1024 // Reduced from 2048 to avoid tokenizer/detokenizer crashes
 
         // Check if OpenCL is available on this device
         // GPU backend requires OpenCL which may not be available on all devices
@@ -412,31 +412,38 @@ class MediaPipeLlmClient @Inject constructor(
 
     /**
      * Sanitize the prompt to reduce chance of generating invalid tokens.
-     * The detokenizer crash (token ID -1) often occurs with unusual characters.
+     * The detokenizer crash (token ID -1) is a native SIGABRT in MediaPipe's JNI layer
+     * that kills the process — it cannot be caught by Java try/catch.
+     * Aggressive sanitization is critical to prevent this.
      */
     private fun sanitizePrompt(prompt: String): String {
         var cleaned = prompt
             // Remove control characters except newlines and tabs
             .replace(Regex("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]"), "")
+            // Strip non-ASCII characters that can confuse the tokenizer/detokenizer
+            // and cause the fatal RET_CHECK id >= 0 crash
+            .replace(Regex("[^\\x20-\\x7E\\n\\t]"), "")
             // Remove any stray model control tokens that might confuse the tokenizer
             .replace("<eos>", "")
             .replace("<bos>", "")
             .replace("<pad>", "")
+            .replace("<start_of_turn>", "")
+            .replace("<end_of_turn>", "")
+            // Collapse multiple whitespace/newlines
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .replace(Regex(" {3,}"), "  ")
             .trim()
 
         // Smart truncation - preserve complete sentences when possible
         if (cleaned.length > MAX_PROMPT_LENGTH) {
-            // Leave room for potential continuation
             val truncated = cleaned.take(MAX_PROMPT_LENGTH - 20)
             val lastPeriod = truncated.lastIndexOf('.')
             val lastNewline = truncated.lastIndexOf('\n')
             val cutPoint = maxOf(lastPeriod, lastNewline)
 
             cleaned = if (cutPoint > truncated.length / 2) {
-                // Cut at sentence/line boundary if it's past halfway
                 truncated.substring(0, cutPoint + 1)
             } else {
-                // Otherwise just truncate with ellipsis indicator
                 truncated + "..."
             }
         }

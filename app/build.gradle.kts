@@ -310,7 +310,8 @@ dependencies {
     implementation("com.google.ai.edge.litert:litert-support:1.0.1")
 
     // MediaPipe LLM Inference for GGUF models on-device
-    implementation("com.google.mediapipe:tasks-genai:0.10.22")
+    // 0.10.24 has fixes for DetokenizerCalculator native crash (RET_CHECK id >= 0)
+    implementation("com.google.mediapipe:tasks-genai:0.10.24")
 
     // ML Kit GenAI Prompt API for Gemini Nano on-device inference (Alpha)
     // This provides access to the on-device Gemini Nano model via AICore

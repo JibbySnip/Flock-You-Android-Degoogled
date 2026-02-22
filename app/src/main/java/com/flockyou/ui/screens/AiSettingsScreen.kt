@@ -179,7 +179,8 @@ fun AiSettingsScreen(
                     LlmEngineSelectionCard(
                         currentEngine = settings.preferredEngine,
                         deviceCapabilities = deviceCapabilities,
-                        onEngineChange = { viewModel.setPreferredEngine(it) }
+                        onEngineChange = { viewModel.setPreferredEngine(it) },
+                        onResetMediaPipe = { viewModel.resetMediaPipeHealth() }
                     )
                 }
 
@@ -1308,7 +1309,8 @@ private fun CapabilityToggle(
 private fun LlmEngineSelectionCard(
     currentEngine: String,
     deviceCapabilities: DetectionAnalyzer.DeviceCapabilities?,
-    onEngineChange: (String) -> Unit
+    onEngineChange: (String) -> Unit,
+    onResetMediaPipe: () -> Unit = {}
 ) {
     var expanded by remember { mutableStateOf(false) }
     val currentPreference = LlmEnginePreference.entries.find { it.id == currentEngine }
@@ -1464,8 +1466,18 @@ private fun LlmEngineSelectionCard(
                         Text(
                             text = "Requires a downloaded Gemma model",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
                         )
+                        TextButton(
+                            onClick = onResetMediaPipe,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Text(
+                                text = "Reset",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
                     }
                 }
                 LlmEnginePreference.RULE_BASED -> {
