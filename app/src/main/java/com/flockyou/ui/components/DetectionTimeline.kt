@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.flockyou.data.model.SignalStrength
 import com.flockyou.data.model.rssiToSignalStrength
@@ -144,7 +145,7 @@ fun DetectionTimeline(
                                 ((event.timestamp - firstSeen).toFloat() / timeRange).coerceIn(0f, 1f)
                             } else 0.5f
                             val x = startX + (lineWidth * progress)
-                            val dotRadius = dotSizeDp.dp.toPx()
+                            val dotRadius = dotSizeDp.toPx()
 
                             // Draw event dot
                             if (event.isActive) {
@@ -304,15 +305,15 @@ private fun formatTimestamp(
  * Get color and size for a timeline dot based on signal strength (RSSI)
  */
 @Composable
-private fun getSignalColorAndSize(rssi: Int?): Pair<Color, Float> {
+private fun getSignalColorAndSize(rssi: Int?): Pair<Color, Dp> {
     if (rssi == null) {
-        return Pair(MaterialTheme.colorScheme.outline, 4.dp.value)
+        return Pair(MaterialTheme.colorScheme.outline, 4.dp)
     }
 
     val signalStrength = rssiToSignalStrength(rssi)
     val color = signalStrength.toColor()
 
-    // Size based on signal strength - stronger = larger
+    // Size based on signal strength - stronger = larger (returns Dp value directly)
     val sizeDp = when (signalStrength) {
         SignalStrength.EXCELLENT -> 7.dp
         SignalStrength.GOOD -> 6.dp
@@ -322,7 +323,7 @@ private fun getSignalColorAndSize(rssi: Int?): Pair<Color, Float> {
         SignalStrength.UNKNOWN -> 4.dp
     }
 
-    return Pair(color, sizeDp.value)
+    return Pair(color, sizeDp)
 }
 
 // ============================================================================

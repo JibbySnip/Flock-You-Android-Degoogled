@@ -86,6 +86,9 @@ object ScanningServiceIpc {
     /** Message sent from service with cross-domain correlation analysis results */
     const val MSG_CORRELATION_RESULTS = 135
 
+    /** Message to update scan settings (wifi interval, BLE duration, protocol enables) */
+    const val MSG_UPDATE_SCAN_SETTINGS = 14
+
     // Bundle keys for state data
     const val KEY_IS_SCANNING = "is_scanning"
     const val KEY_DETECTION_COUNT = "detection_count"
@@ -97,6 +100,14 @@ object ScanningServiceIpc {
     const val KEY_CELLULAR_STATUS = "cellular_status"
     const val KEY_SATELLITE_STATUS = "satellite_status"
     const val KEY_ERROR_MESSAGE = "error_message"
+
+    // Bundle keys for scan settings
+    const val KEY_WIFI_INTERVAL = "wifi_interval"
+    const val KEY_BLE_DURATION = "ble_duration"
+    const val KEY_ENABLE_BLE = "enable_ble"
+    const val KEY_ENABLE_WIFI = "enable_wifi"
+    const val KEY_ENABLE_CELLULAR = "enable_cellular"
+    const val KEY_TRACK_SEEN_DEVICES = "track_seen_devices"
 
     // Bundle keys for complex JSON data
     const val KEY_JSON_DATA = "json_data"
@@ -822,6 +833,33 @@ class ScanningServiceConnection(private val context: Context) {
             serviceMessenger?.send(msg)
         } catch (e: RemoteException) {
             Log.e(tag, "Failed to request threading data", e)
+        }
+    }
+
+    /**
+     * Update scan settings in the service process via IPC.
+     */
+    fun updateScanSettings(
+        wifiIntervalSeconds: Int,
+        bleDurationSeconds: Int,
+        enableBle: Boolean,
+        enableWifi: Boolean,
+        enableCellular: Boolean,
+        trackSeenDevices: Boolean
+    ) {
+        try {
+            val msg = Message.obtain(null, ScanningServiceIpc.MSG_UPDATE_SCAN_SETTINGS)
+            msg.data = Bundle().apply {
+                putInt(ScanningServiceIpc.KEY_WIFI_INTERVAL, wifiIntervalSeconds)
+                putInt(ScanningServiceIpc.KEY_BLE_DURATION, bleDurationSeconds)
+                putBoolean(ScanningServiceIpc.KEY_ENABLE_BLE, enableBle)
+                putBoolean(ScanningServiceIpc.KEY_ENABLE_WIFI, enableWifi)
+                putBoolean(ScanningServiceIpc.KEY_ENABLE_CELLULAR, enableCellular)
+                putBoolean(ScanningServiceIpc.KEY_TRACK_SEEN_DEVICES, trackSeenDevices)
+            }
+            serviceMessenger?.send(msg)
+        } catch (e: RemoteException) {
+            Log.e(tag, "Failed to send update scan settings command", e)
         }
     }
 

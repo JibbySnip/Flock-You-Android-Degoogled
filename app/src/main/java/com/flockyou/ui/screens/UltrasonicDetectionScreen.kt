@@ -177,7 +177,7 @@ fun UltrasonicDetectionScreen(
                     )
                     2 -> UltrasonicAnomaliesContent(
                         anomalies = ultrasonicAnomalies,
-                        onClear = { /* No clear function available */ }
+                        onClear = null
                     )
                 }
             }
@@ -870,7 +870,7 @@ private fun KnownBeaconFrequenciesCard() {
 @Composable
 private fun UltrasonicAnomaliesContent(
     anomalies: List<UltrasonicAnomaly>,
-    onClear: () -> Unit
+    onClear: (() -> Unit)? = null
 ) {
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
@@ -919,8 +919,10 @@ private fun UltrasonicAnomaliesContent(
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
-                    TextButton(onClick = onClear) {
-                        Text("Clear All")
+                    onClear?.let { clearAction ->
+                        TextButton(onClick = clearAction) {
+                            Text("Clear All")
+                        }
                     }
                 }
             }

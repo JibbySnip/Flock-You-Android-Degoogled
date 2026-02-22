@@ -909,10 +909,7 @@ fun MainScreen(
                 selectedDetection = relatedDetection
                 viewModel.onRelatedDetectionSelected(relatedDetection)
             },
-            onSeeAllRelatedClick = {
-                // For now, just scroll within the list - could navigate to a full screen later
-                // The RelatedDetectionsSection already shows a "See All" card
-            }
+            onSeeAllRelatedClick = null
         )
     }
 

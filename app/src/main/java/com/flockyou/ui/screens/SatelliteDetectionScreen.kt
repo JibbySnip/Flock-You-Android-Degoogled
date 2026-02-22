@@ -205,7 +205,7 @@ fun SatelliteDetectionScreen(
                     )
                     2 -> SatelliteAnomaliesContent(
                         anomalies = satelliteAnomalies,
-                        onClear = { /* No clear function available */ }
+                        onClear = null
                     )
                     3 -> SatelliteCoverageContent()
                     4 -> SatelliteRulesContent()
@@ -2081,7 +2081,7 @@ private fun SatelliteDetectionInfoCard() {
 @Composable
 private fun SatelliteAnomaliesContent(
     anomalies: List<SatelliteAnomaly>,
-    onClear: () -> Unit
+    onClear: (() -> Unit)? = null
 ) {
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
@@ -2158,8 +2158,10 @@ private fun SatelliteAnomaliesContent(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    TextButton(onClick = onClear) {
-                        Text("Clear All")
+                    onClear?.let { clearAction ->
+                        TextButton(onClick = clearAction) {
+                            Text("Clear All")
+                        }
                     }
                 }
             }

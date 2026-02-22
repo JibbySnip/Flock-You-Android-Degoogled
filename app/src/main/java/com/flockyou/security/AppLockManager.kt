@@ -173,6 +173,21 @@ class AppLockManager @Inject constructor(
     }
 
     /**
+     * Returns the stored PIN hash and salt for comparison purposes (e.g., duress PIN validation).
+     * Returns (null, null) if no PIN is set or on security error.
+     */
+    fun getStoredPinCredentials(): Pair<String?, String?> {
+        return try {
+            val hash = encryptedPrefs.getString(KEY_PIN_HASH, null)
+            val salt = encryptedPrefs.getString(KEY_PIN_SALT, null)
+            Pair(hash, salt)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Security exception reading PIN credentials", e)
+            Pair(null, null)
+        }
+    }
+
+    /**
      * Validate PIN complexity to reject common/weak sequences.
      * Rejects:
      * - All same digits (1111, 0000)

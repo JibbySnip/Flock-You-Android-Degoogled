@@ -50,9 +50,7 @@ import com.flockyou.ui.screens.MainScreen
 import com.flockyou.ui.screens.MapScreen
 import com.flockyou.ui.screens.SettingsScreen
 import com.flockyou.ui.screens.NearbyDevicesScreen
-import com.flockyou.ui.screens.DetectionPatternsScreen
 import com.flockyou.ui.screens.NotificationSettingsScreen
-import com.flockyou.ui.screens.RuleSettingsScreen
 import com.flockyou.ui.screens.AllDetectionsScreen
 import com.flockyou.ui.screens.DetectionSettingsScreen
 import com.flockyou.ui.screens.SecuritySettingsScreen
@@ -70,7 +68,6 @@ import com.flockyou.ui.screens.SatelliteDetectionScreen
 import com.flockyou.ui.screens.WifiSecurityScreen
 import com.flockyou.ui.screens.AiSettingsScreen
 import com.flockyou.ui.screens.ServiceHealthStatusScreen
-import com.flockyou.ui.screens.FlipperSettingsScreen
 import com.flockyou.ui.screens.ActiveProbesScreen
 import com.flockyou.ui.screens.TestModeSettingsScreen
 import com.flockyou.ui.theme.FlockYouTheme
@@ -371,18 +368,8 @@ fun AppNavigation(
                 onNavigateBack = { navController.popBackStack() }
             )
         }
-        composable("patterns") {
-            DetectionPatternsScreen(
-                onNavigateBack = { navController.popBackStack() }
-            )
-        }
         composable("notifications") {
             NotificationSettingsScreen(
-                onNavigateBack = { navController.popBackStack() }
-            )
-        }
-        composable("rules") {
-            RuleSettingsScreen(
                 onNavigateBack = { navController.popBackStack() }
             )
         }
@@ -446,12 +433,6 @@ fun AppNavigation(
         composable("service_health") {
             ServiceHealthStatusScreen(
                 onNavigateBack = { navController.popBackStack() }
-            )
-        }
-        composable("flipper_settings") {
-            FlipperSettingsScreen(
-                onNavigateBack = { navController.popBackStack() },
-                onNavigateToActiveProbes = { navController.navigate("active_probes") }
             )
         }
         composable("active_probes") {

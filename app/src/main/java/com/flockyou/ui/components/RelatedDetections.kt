@@ -49,10 +49,10 @@ fun RelatedDetectionsSection(
     relatedDetections: List<Detection>,
     onDetectionClick: (Detection) -> Unit,
     onSeeAllClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showSeeAll: Boolean = relatedDetections.size > MAX_VISIBLE_DETECTIONS
 ) {
     val visibleDetections = relatedDetections.take(MAX_VISIBLE_DETECTIONS)
-    val hasMoreDetections = relatedDetections.size > MAX_VISIBLE_DETECTIONS
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -66,7 +66,7 @@ fun RelatedDetectionsSection(
             // Header with title and count badge
             RelatedDetectionsHeader(
                 count = relatedDetections.size,
-                showSeeAll = hasMoreDetections,
+                showSeeAll = showSeeAll,
                 onSeeAllClick = onSeeAllClick
             )
 
@@ -91,7 +91,7 @@ fun RelatedDetectionsSection(
                     }
 
                     // Show "See All" card at the end if there are more detections
-                    if (hasMoreDetections) {
+                    if (showSeeAll && relatedDetections.size > MAX_VISIBLE_DETECTIONS) {
                         SeeAllCard(
                             remainingCount = relatedDetections.size - MAX_VISIBLE_DETECTIONS,
                             onClick = onSeeAllClick

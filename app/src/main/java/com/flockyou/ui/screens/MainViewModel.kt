@@ -838,7 +838,25 @@ class MainViewModel @Inject constructor(
     }
 
     fun clearErrors() {
-        ScanningService.clearErrors()
+        serviceConnection.clearErrors()
+    }
+
+    fun updateScanSettings(
+        wifiIntervalSeconds: Int,
+        bleDurationSeconds: Int,
+        enableBle: Boolean,
+        enableWifi: Boolean,
+        enableCellular: Boolean,
+        trackSeenDevices: Boolean
+    ) {
+        serviceConnection.updateScanSettings(
+            wifiIntervalSeconds = wifiIntervalSeconds,
+            bleDurationSeconds = bleDurationSeconds,
+            enableBle = enableBle,
+            enableWifi = enableWifi,
+            enableCellular = enableCellular,
+            trackSeenDevices = trackSeenDevices
+        )
     }
 
     /**

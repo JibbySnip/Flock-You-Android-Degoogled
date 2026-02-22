@@ -553,9 +553,9 @@ private fun CellularStatusHeader(cellStatus: CellularMonitor.CellStatus?) {
 private fun SignalBarsIcon(bars: Int) {
     val iconVector = when (bars) {
         4 -> Icons.Default.SignalCellular4Bar
-        3 -> Icons.Default.SignalCellular4Bar // Using 4 bar, would need custom assets
-        2 -> Icons.Default.SignalCellular4Bar
-        1 -> Icons.Default.SignalCellular4Bar
+        3 -> Icons.Default.SignalCellularAlt
+        2 -> Icons.Default.NetworkCell
+        1 -> Icons.Default.SignalCellularConnectedNoInternet0Bar
         else -> Icons.Default.SignalCellularOff
     }
     

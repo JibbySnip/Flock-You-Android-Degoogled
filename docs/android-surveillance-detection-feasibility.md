@@ -325,9 +325,9 @@ The CellGuard research is particularly relevant: it demonstrates that comparing 
 
 #### With a Custom OS Fork
 
-Cellular detection sees the most dramatic improvement with a custom OS, primarily through baseband diagnostic interfaces:
+Cellular detection sees the most dramatic improvement with a custom OS, through baseband diagnostic interfaces on **both** Qualcomm and Samsung modem platforms.
 
-**Qualcomm QCDM (`/dev/diag`) access**: This is the crown jewel. Qualcomm's diagnostic mode (QCDM/DIAG) exposes raw baseband signaling messages. Stock Android's SELinux policy blocks all access to `/dev/diag`. A custom OS can:
+**Qualcomm QCDM (`/dev/diag`) access**: On devices with Qualcomm modems (Pixel 4/5, OnePlus 7/8). Qualcomm's diagnostic mode (QCDM/DIAG) exposes raw baseband signaling messages. Stock Android's SELinux policy blocks all access to `/dev/diag`. A custom OS can:
 - Create a custom SELinux domain granting `diag_device` access to the detection daemon
 - Use [QCSuper](https://github.com/P1sec/QCSuper) or custom DIAG protocol parsers to read:
   - **Null cipher detection (A5/0)**: Directly observe when the baseband selects A5/0 (no encryption) or A5/1 (weak encryption). This is definitive IMSI catcher evidence -- real networks use A5/3 or better.
@@ -346,11 +346,19 @@ Cellular detection sees the most dramatic improvement with a custom OS, primaril
 
 **Android 14 `DISALLOW_CELLULAR_2G` enforcement**: On a custom OS, you can enforce 2G disablement by default at the framework level (not just exposing it as a toggle). Combined with carrier config overrides, this provides baseline protection against 2G downgrade attacks for all users of the OS, not just those who find the setting.
 
-**IMEI/IMSI access**: Platform signing grants `READ_PRIVILEGED_PHONE_STATE`, enabling direct IMEI and IMSI reads. Combined with QCDM data, the OS can definitively confirm: "An IMSI catcher on [frequency] using [cipher] captured IMSI [value] at [time]."
+**Samsung Shannon SDM (`/dev/umts_dm0`) access**: On devices with Samsung Exynos modems (Pixel 6-9, Samsung Galaxy S20-S22 Exynos). Shannon modems expose diagnostic data via `/dev/umts_dm0` using the proprietary SDM (Samsung Diagnostic Message) format. The open-source [SCAT](https://github.com/fgsect/scat) tool parses SDM into GSMTAP for analysis. A custom OS can:
+- Create a SELinux domain granting access to `/dev/umts_dm0` (no magic number required for on-device access -- only USB diagnostic sessions require authentication)
+- Parse SDM messages to extract NAS and RRC signaling, including cipher mode selection, identity requests, and authentication events
+- Integrate SCAT's parsing logic as a native library for real-time signaling analysis
+- Monitor the SIPC IPC protocol on `/dev/umts_ipc0` for all 873+ baseband commands (documented by BaseMirror, CCS 2024)
+
+See [Shannon Modem Diagnostic Implementation](shannon-modem-diagnostic-implementation.md) for the detailed implementation plan.
+
+**IMEI/IMSI access**: Platform signing grants `READ_PRIVILEGED_PHONE_STATE`, enabling direct IMEI and IMSI reads. Combined with QCDM or Shannon SDM data, the OS can definitively confirm: "An IMSI catcher on [frequency] using [cipher] captured IMSI [value] at [time]."
 
 #### Verdict
 
-Cellular detection provides genuinely useful heuristics on stock Android, especially encryption downgrade detection and test MCC/MNC identification. The trusted cell database approach is validated by academic research. However, without root or OEM privileges, the app cannot access the baseband or confirm identity capture. Most single-indicator anomalies are correctly scored as LOW/INFO severity. The scoring system reflects honest confidence: only multi-indicator scenarios (downgrade + signal spike + unknown tower) reach HIGH/CRITICAL. **A custom OS with Qualcomm QCDM access transforms cellular detection from heuristic guessing into definitive analysis** -- the single most impactful upgrade across all protocols.
+Cellular detection provides genuinely useful heuristics on stock Android, especially encryption downgrade detection and test MCC/MNC identification. The trusted cell database approach is validated by academic research. However, without root or OEM privileges, the app cannot access the baseband or confirm identity capture. Most single-indicator anomalies are correctly scored as LOW/INFO severity. The scoring system reflects honest confidence: only multi-indicator scenarios (downgrade + signal spike + unknown tower) reach HIGH/CRITICAL. **A custom OS with QCDM (Qualcomm) or Shannon SDM (Samsung) access transforms cellular detection from heuristic guessing into definitive analysis** -- the single most impactful upgrade across all protocols.
 
 ---
 
@@ -769,17 +777,18 @@ Device selection is the most consequential decision, because chipset determines 
 
 | Device | WiFi Chipset | WiFi Monitor Mode | Cellular Modem | QCDM Access | GNSS | Recommended For |
 |---|---|---|---|---|---|---|
-| **Samsung S10/S20 (Exynos)** | Broadcom BCM4375 | **Yes (Nexmon)** | Samsung Shannon | Limited | Broadcom | WiFi attack detection focus |
-| **Google Pixel 4/5** | Qualcomm QCA6390 | **Yes (qcacld-3.0)** | Qualcomm SDX55 | **Yes** | Qualcomm | Cellular IMSI catcher focus |
-| **Google Pixel 6/7** | Broadcom BCM4389 | **Yes (Nexmon)** | Samsung Exynos 5300 | Limited | Qualcomm | Balanced (WiFi + GNSS) |
-| **Google Pixel 8/9** | Broadcom BCM4398 | Likely (Nexmon WIP) | Samsung Exynos 5400 | Limited | Qualcomm | Future-proofing + Gemini Nano |
-| **OnePlus 7/8** | Qualcomm QCA6390 | **Yes (qcacld-3.0)** | Qualcomm SDX55 | **Yes** | Qualcomm | Budget QCDM option |
+| **Samsung S10/S20 (Exynos)** | Broadcom BCM4375 | **Yes (Nexmon)** | Samsung Shannon | **Yes (SDM via SCAT)** | Broadcom | WiFi attack detection focus |
+| **Google Pixel 4/5** | Qualcomm QCA6390 | **Yes (qcacld-3.0)** | Qualcomm SDX55 | **Yes (QCDM)** | Qualcomm | Cellular IMSI catcher focus (QCDM) |
+| **Google Pixel 6/7** | Broadcom BCM4389 | **Yes (Nexmon)** | Samsung Exynos 5300 | **Yes (SDM via SCAT)** | Qualcomm | Balanced (WiFi + GNSS + Shannon SDM) |
+| **Google Pixel 8/9** | Broadcom BCM4398 | Likely (Nexmon WIP) | Samsung Exynos 5400 | **SDM (untested on 5400)** | Qualcomm | Future-proofing + Gemini Nano |
+| **OnePlus 7/8** | Qualcomm QCA6390 | **Yes (qcacld-3.0)** | Qualcomm SDX55 | **Yes (QCDM)** | Qualcomm | Budget QCDM option |
 | **PinePhone Pro** | RTL8723CS | Limited | Quectel EG25-G | **Yes (AT commands)** | u-blox | Hardware isolation research |
 
 **The ideal surveillance detection device does not exist.** No single phone has Broadcom WiFi (best Nexmon support) + Qualcomm modem (best QCDM) + modern SoC. The best current compromise is:
 - **For WiFi focus**: Samsung Galaxy S10e/S20 Exynos with Nexmon
-- **For cellular focus**: Pixel 4/5 or OnePlus 7T with Qualcomm modem + QCDM
-- **For maximum breadth**: Pixel 6/7 (Broadcom WiFi for Nexmon + good GNSS + Tensor NPU for on-device LLM)
+- **For cellular focus (QCDM)**: Pixel 4/5 or OnePlus 7T with Qualcomm modem
+- **For cellular focus (Shannon SDM)**: Pixel 6/7 with Samsung Exynos 5300 modem + SCAT (see [Shannon Modem Diagnostic Implementation](shannon-modem-diagnostic-implementation.md))
+- **For maximum breadth**: Pixel 6/7 (Broadcom WiFi for Nexmon + good GNSS + Tensor NPU for on-device LLM + Shannon SDM)
 
 ### Recommended Base OS
 
@@ -920,6 +929,11 @@ The most important design decision remains **honest communication**: scoring ano
 ### Custom OS & Baseband Tools
 - [Nexmon](https://nexmon.org/) -- Broadcom/Cypress WiFi firmware patching framework (monitor mode, packet injection)
 - [QCSuper](https://github.com/P1sec/QCSuper) -- Qualcomm QCDM/DIAG protocol tool for baseband diagnostic capture
+- [SCAT](https://github.com/fgsect/scat) -- Samsung Shannon SDM signaling capture tool (GSMTAP output for Wireshark)
+- [libsamsung-ipc](https://github.com/morphis/libsamsung-ipc) -- Open-source Samsung IPC modem protocol implementation (Replicant/LineageOS)
+- [ShannonBaseband](https://github.com/grant-h/ShannonBaseband) -- Shannon baseband RE tools, Ghidra loader, BTL parser
+- [FirmWire](https://github.com/FirmWire/FirmWire) -- Full-system Shannon/MediaTek baseband emulator (NDSS 2022)
+- [BaseMirror](https://github.com/OSUSecLab/BaseMirror) -- Automated Samsung RIL command reverse engineering (CCS 2024, 873 commands extracted)
 - [nl80211 Documentation](https://wireless.wiki.kernel.org/en/developers/documentation/nl80211) -- Linux wireless netlink interface for WiFi control
 - [eBPF LSM](https://docs.kernel.org/bpf/prog_lsm.html) -- Linux Security Module hooks via eBPF programs
 - [qcacld-3.0](https://source.codeaurora.org/quic/la/platform/vendor/qcom-opensource/wlan/qcacld-3.0/) -- Qualcomm open-source WiFi driver (monitor mode support)

@@ -175,7 +175,7 @@ fun WifiSecurityScreen(
                     )
                     1 -> WifiThreatsContent(
                         anomalies = wifiAnomalies,
-                        onClear = { /* No clear function available */ }
+                        onClear = null
                     )
                     2 -> SuspiciousNetworksContent(
                         networks = suspiciousNetworks
@@ -680,7 +680,7 @@ private fun WifiSecurityInfoCard() {
 @Composable
 private fun WifiThreatsContent(
     anomalies: List<WifiAnomaly>,
-    onClear: () -> Unit
+    onClear: (() -> Unit)? = null
 ) {
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
@@ -729,8 +729,10 @@ private fun WifiThreatsContent(
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
-                    TextButton(onClick = onClear) {
-                        Text("Clear All")
+                    onClear?.let { clearAction ->
+                        TextButton(onClick = clearAction) {
+                            Text("Clear All")
+                        }
                     }
                 }
             }

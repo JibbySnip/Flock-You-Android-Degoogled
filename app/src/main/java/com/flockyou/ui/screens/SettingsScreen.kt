@@ -161,7 +161,7 @@ fun SettingsScreen(
                         // Persist to DataStore via ViewModel
                         viewModel.setGlobalDetectionEnabled(ble = enabled)
                         updateScanSettings(
-                            wifiInterval, bleDuration,
+                            viewModel, wifiInterval, bleDuration,
                             enabled, enableWifi, enableCellular, trackSeenDevices
                         )
                     },
@@ -169,7 +169,7 @@ fun SettingsScreen(
                         // Persist to DataStore via ViewModel
                         viewModel.setGlobalDetectionEnabled(wifi = enabled)
                         updateScanSettings(
-                            wifiInterval, bleDuration,
+                            viewModel, wifiInterval, bleDuration,
                             enableBle, enabled, enableCellular, trackSeenDevices
                         )
                     },
@@ -177,7 +177,7 @@ fun SettingsScreen(
                         // Persist to DataStore via ViewModel
                         viewModel.setGlobalDetectionEnabled(cellular = enabled)
                         updateScanSettings(
-                            wifiInterval, bleDuration,
+                            viewModel, wifiInterval, bleDuration,
                             enableBle, enableWifi, enabled, trackSeenDevices
                         )
                     },
@@ -212,7 +212,7 @@ fun SettingsScreen(
                         }
                         val presetEnableCellular = true
                         updateScanSettings(
-                            wifiInterval, bleDuration,
+                            viewModel, wifiInterval, bleDuration,
                             presetEnableBle, presetEnableWifi, presetEnableCellular, trackSeenDevices
                         )
                     },
@@ -253,7 +253,7 @@ fun SettingsScreen(
                         onCategoryToggle = { enabled ->
                             viewModel.setGlobalDetectionEnabled(cellular = enabled)
                             updateScanSettings(
-                                wifiInterval, bleDuration,
+                                viewModel, wifiInterval, bleDuration,
                                 enableBle, enableWifi, enabled, trackSeenDevices
                             )
                         },
@@ -327,7 +327,7 @@ fun SettingsScreen(
                         onCategoryToggle = { enabled ->
                             viewModel.setGlobalDetectionEnabled(ble = enabled)
                             updateScanSettings(
-                                wifiInterval, bleDuration,
+                                viewModel, wifiInterval, bleDuration,
                                 enabled, enableWifi, enableCellular, trackSeenDevices
                             )
                         },
@@ -357,7 +357,7 @@ fun SettingsScreen(
                                     steps = 4,
                                     onValueChangeFinished = {
                                         updateScanSettings(
-                                            wifiInterval, bleDuration,
+                                            viewModel, wifiInterval, bleDuration,
                                             enableBle, enableWifi, enableCellular, trackSeenDevices
                                         )
                                     }
@@ -379,7 +379,7 @@ fun SettingsScreen(
                         onCategoryToggle = { enabled ->
                             viewModel.setGlobalDetectionEnabled(wifi = enabled)
                             updateScanSettings(
-                                wifiInterval, bleDuration,
+                                viewModel, wifiInterval, bleDuration,
                                 enableBle, enabled, enableCellular, trackSeenDevices
                             )
                         },
@@ -414,7 +414,7 @@ fun SettingsScreen(
                                     steps = 8,
                                     onValueChangeFinished = {
                                         updateScanSettings(
-                                            wifiInterval, bleDuration,
+                                            viewModel, wifiInterval, bleDuration,
                                             enableBle, enableWifi, enableCellular, trackSeenDevices
                                         )
                                     }
@@ -1029,6 +1029,7 @@ fun SettingsScreen(
 }
 
 private fun updateScanSettings(
+    viewModel: MainViewModel,
     wifiIntervalSeconds: Int,
     bleDurationSeconds: Int,
     enableBle: Boolean,
@@ -1036,7 +1037,7 @@ private fun updateScanSettings(
     enableCellular: Boolean,
     trackSeenDevices: Boolean
 ) {
-    ScanningService.updateSettings(
+    viewModel.updateScanSettings(
         wifiIntervalSeconds = wifiIntervalSeconds,
         bleDurationSeconds = bleDurationSeconds,
         enableBle = enableBle,

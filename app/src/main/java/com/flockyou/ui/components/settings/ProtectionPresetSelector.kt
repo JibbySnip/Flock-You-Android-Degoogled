@@ -233,6 +233,8 @@ private fun PresetBottomSheetContent(
     onPresetSelected: (ProtectionPreset) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var selectedPreset by remember { mutableStateOf(currentPreset) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -270,8 +272,8 @@ private fun PresetBottomSheetContent(
             items(ProtectionPreset.entries.toList()) { preset ->
                 PresetDetailCard(
                     preset = preset,
-                    isSelected = currentPreset == preset,
-                    onClick = { onPresetSelected(preset) }
+                    isSelected = selectedPreset == preset,
+                    onClick = { selectedPreset = preset }
                 )
             }
 
@@ -295,7 +297,7 @@ private fun PresetBottomSheetContent(
             }
 
             Button(
-                onClick = { onPresetSelected(currentPreset) },
+                onClick = { onPresetSelected(selectedPreset) },
                 modifier = Modifier.weight(1f)
             ) {
                 Text("Confirm")

@@ -473,6 +473,17 @@ class ScanningService : Service() {
                         clearErrors()
                         broadcastErrorLog()
                     }
+                    ScanningServiceIpc.MSG_UPDATE_SCAN_SETTINGS -> {
+                        val data = msg.data
+                        ScanningServiceState.updateSettings(
+                            wifiIntervalSeconds = data.getInt(ScanningServiceIpc.KEY_WIFI_INTERVAL, 35),
+                            bleDurationSeconds = data.getInt(ScanningServiceIpc.KEY_BLE_DURATION, 10),
+                            enableBle = data.getBoolean(ScanningServiceIpc.KEY_ENABLE_BLE, true),
+                            enableWifi = data.getBoolean(ScanningServiceIpc.KEY_ENABLE_WIFI, true),
+                            enableCellular = data.getBoolean(ScanningServiceIpc.KEY_ENABLE_CELLULAR, true),
+                            trackSeenDevices = data.getBoolean(ScanningServiceIpc.KEY_TRACK_SEEN_DEVICES, true)
+                        )
+                    }
                     ScanningServiceIpc.MSG_CLEAR_LEARNED_SIGNATURES -> {
                         learnedSignatureHandler.clearSignatures()
                         // Keep companion object in sync for backward compatibility

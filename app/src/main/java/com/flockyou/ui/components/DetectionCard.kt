@@ -230,8 +230,8 @@ fun DetectionCard(
     val threatColor = detection.threatLevel.toColor()
     val dateFormat = remember { SimpleDateFormat("MMM dd", Locale.getDefault()) }
 
-    // Calculate relative time
-    val relativeTime = remember(detection.timestamp) {
+    // Calculate relative time (not memoized so it updates on recomposition)
+    val relativeTime = run {
         val now = System.currentTimeMillis()
         val diff = now - detection.timestamp
         when {
@@ -252,7 +252,7 @@ fun DetectionCard(
         ),
         onClick = onClick
     ) {
-        Row(modifier = Modifier.fillMaxWidth()) {
+        Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             // Colored left border based on threat level (4dp width)
             Box(
                 modifier = Modifier

@@ -48,7 +48,7 @@ fun DetectionDetailSheet(
     advancedMode: Boolean = false,
     relatedDetections: List<Detection> = emptyList(),
     onRelatedDetectionClick: (Detection) -> Unit = {},
-    onSeeAllRelatedClick: () -> Unit = {}
+    onSeeAllRelatedClick: (() -> Unit)? = null
 ) {
     val threatColor = detection.threatLevel.toColor()
     val deviceInfo = DetectionPatterns.getDeviceTypeInfo(detection.deviceType)
@@ -1102,7 +1102,8 @@ fun DetectionDetailSheet(
                 RelatedDetectionsSection(
                     relatedDetections = relatedDetections,
                     onDetectionClick = onRelatedDetectionClick,
-                    onSeeAllClick = onSeeAllRelatedClick
+                    onSeeAllClick = onSeeAllRelatedClick ?: {},
+                    showSeeAll = onSeeAllRelatedClick != null
                 )
                 Spacer(modifier = Modifier.height(16.dp))
             }

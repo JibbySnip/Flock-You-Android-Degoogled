@@ -820,7 +820,6 @@ private fun DangerZoneItem(
     }
 }
 
-@Suppress("UNUSED_PARAMETER")
 @Composable
 private fun SetDuressPinDialog(
     appLockManager: AppLockManager,
@@ -880,12 +879,11 @@ private fun SetDuressPinDialog(
                             confirmPin = ""
                         } else {
                             scope.launch {
-                                // Get normal PIN hash from AppLockManager for comparison
-                                // We need to ensure duress PIN is different
+                                val (normalHash, normalSalt) = appLockManager.getStoredPinCredentials()
                                 val success = duressAuthenticator.setDuressPin(
                                     pin = pin,
-                                    normalPinHash = null, // Would need to get from AppLockManager
-                                    normalPinSalt = null
+                                    normalPinHash = normalHash,
+                                    normalPinSalt = normalSalt
                                 )
                                 if (success) {
                                     onPinSet()

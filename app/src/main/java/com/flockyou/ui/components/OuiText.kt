@@ -112,7 +112,7 @@ fun OuiText(
     overflow: TextOverflow = TextOverflow.Ellipsis,
     viewModel: OuiLookupViewModel = hiltViewModel()
 ) {
-    // Trigger lookup and observe results
+    // Trigger lookup and observe results reactively
     val lookupResults by viewModel.lookupResults.collectAsState()
 
     // Trigger the lookup on composition
@@ -120,8 +120,11 @@ fun OuiText(
         viewModel.lookupManufacturer(macAddress)
     }
 
-    // Get the manufacturer name (from cache or freshly looked up)
-    val manufacturer = viewModel.getCachedManufacturer(macAddress)
+    // Derive manufacturer from the reactive lookup results state
+    val normalizedOui = remember(macAddress) {
+        macAddress.uppercase().replace("-", "").replace(":", "").replace(".", "").take(6)
+    }
+    val manufacturer = lookupResults[normalizedOui]
 
     val displayText = when {
         manufacturer != null && showMac -> "$manufacturer ($macAddress)"
@@ -174,7 +177,7 @@ fun ManufacturerText(
         return
     }
 
-    // Trigger lookup and observe results
+    // Trigger lookup and observe results reactively
     val lookupResults by viewModel.lookupResults.collectAsState()
 
     // Trigger the lookup on composition
@@ -182,8 +185,11 @@ fun ManufacturerText(
         viewModel.lookupManufacturer(macAddress)
     }
 
-    // Get the manufacturer name (from cache or freshly looked up)
-    val manufacturer = viewModel.getCachedManufacturer(macAddress)
+    // Derive manufacturer from the reactive lookup results state
+    val normalizedOui = remember(macAddress) {
+        macAddress.uppercase().replace("-", "").replace(":", "").replace(".", "").take(6)
+    }
+    val manufacturer = lookupResults[normalizedOui]
 
     Text(
         text = manufacturer ?: fallback,

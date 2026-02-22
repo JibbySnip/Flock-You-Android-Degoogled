@@ -207,7 +207,7 @@ fun RfDetectionScreen(
                     )
                     1 -> RfAnomaliesContent(
                         anomalies = rfAnomalies,
-                        onClear = { /* No clear function available */ }
+                        onClear = null
                     )
                     2 -> DronesContent(
                         drones = detectedDrones,
@@ -773,7 +773,7 @@ private fun RfInfoCard() {
 @Composable
 private fun RfAnomaliesContent(
     anomalies: List<RfAnomaly>,
-    onClear: () -> Unit
+    onClear: (() -> Unit)? = null
 ) {
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
@@ -822,8 +822,10 @@ private fun RfAnomaliesContent(
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
-                    TextButton(onClick = onClear) {
-                        Text("Clear All")
+                    onClear?.let { clearAction ->
+                        TextButton(onClick = clearAction) {
+                            Text("Clear All")
+                        }
                     }
                 }
             }
