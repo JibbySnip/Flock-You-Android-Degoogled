@@ -12,9 +12,12 @@ import android.content.*
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.net.wifi.WifiManager
 import android.os.*
 import android.util.Log
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.flockyou.BuildConfig
@@ -26,7 +29,6 @@ import com.flockyou.detection.DetectionRegistry
 import com.flockyou.detection.handler.BleDetectionHandler
 import com.flockyou.detection.handler.CellularDetectionHandler
 import com.flockyou.detection.handler.SatelliteDetectionHandler
-import com.google.android.gms.location.*
 import com.google.gson.Gson
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
@@ -270,7 +272,18 @@ class ScanningService : Service() {
     private var wifiScanReceiver: BroadcastReceiver? = null
 
     // Location
-    private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private lateinit var locationManager: LocationManager
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            currentLocation = location
+            locationStatus.value = SubsystemStatus.Active
+        }
+
+        override fun onProviderEnabled(provider: String) {}
+        override fun onProviderDisabled(provider: String) {}
+        @Deprecated("Deprecated in Java")
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+    }
     internal var currentLocation: Location? = null
 
     // Vibration
@@ -528,6 +541,7 @@ class ScanningService : Service() {
 
     // ==================== Service Lifecycle ====================
 
+    @RequiresApi(Build.VERSION_CODES.S)
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
@@ -544,7 +558,42 @@ class ScanningService : Service() {
         wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
 
         // Initialize Location
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        try {
+            if (hasLocationPermissions()) {
+                if (locationManager.allProviders.contains(LocationManager.GPS_PROVIDER)) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        5000L,
+                        10f,
+                        locationListener
+                    )
+                }
+                if (locationManager.allProviders.contains(LocationManager.NETWORK_PROVIDER)) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        5000L,
+                        10f,
+                        locationListener
+                    )
+                }
+
+                if (locationManager.allProviders.contains(LocationManager.FUSED_PROVIDER)) {
+                        locationManager.requestLocationUpdates(
+                            LocationManager.FUSED_PROVIDER,
+                            5000L,
+                            10f,
+                            locationListener
+                        )
+                }
+
+
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Failed to request location updates", e)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "Location provider not available", e)
+        }
 
         // Initialize Vibrator
         vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1882,20 +1931,32 @@ class ScanningService : Service() {
             return
         }
 
-        fusedLocationClient.lastLocation
-            .addOnSuccessListener { location ->
-                currentLocation = location
-                locationStatus.value = if (location != null) {
-                    SubsystemStatus.Active
-                } else {
-                    SubsystemStatus.Error(-1, "No location available")
-                }
+        try {
+            val lastGps = if (locationManager.allProviders.contains(LocationManager.GPS_PROVIDER)) {
+                locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+            } else null
+            
+            val lastNetwork = if (locationManager.allProviders.contains(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            } else null
+
+            val bestLocation = if (lastGps != null && lastNetwork != null) {
+                if (lastGps.time > lastNetwork.time) lastGps else lastNetwork
+            } else {
+                lastGps ?: lastNetwork
             }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "Failed to get location", e)
-                locationStatus.value = SubsystemStatus.Error(-1, e.message ?: "Location error")
-                logError("Location", -1, "Failed to get location: ${e.message}", recoverable = true)
+
+            if (bestLocation != null) {
+                currentLocation = bestLocation
+                locationStatus.value = SubsystemStatus.Active
+            } else {
+                locationStatus.value = SubsystemStatus.Error(-1, "No location available")
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get location", e)
+            locationStatus.value = SubsystemStatus.Error(-1, e.message ?: "Location error")
+            logError("Location", -1, "Failed to get location: ${e.message}", recoverable = true)
+        }
     }
 
     // ==================== Detector Health Management ====================

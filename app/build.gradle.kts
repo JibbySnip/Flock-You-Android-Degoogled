@@ -263,9 +263,6 @@ dependencies {
     implementation("net.zetetic:sqlcipher-android:4.12.0@aar")
     implementation("androidx.sqlite:sqlite-ktx:2.4.0")
     
-    // Location
-    implementation("com.google.android.gms:play-services-location:21.1.0")
-    
     // Maps - OpenStreetMap (no API key required)
     implementation("org.osmdroid:osmdroid-android:6.1.18")
     
@@ -274,7 +271,6 @@ dependencies {
     
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
     
     // JSON
     implementation("com.google.code.gson:gson:2.10.1")

@@ -65,6 +65,9 @@ data class DetectionMethodInfo(
 fun PermissionSetupWizard(
     onRequestPermissions: () -> Unit,
     onRequestBackgroundLocation: () -> Unit,
+    permanentlyDenied: Boolean = false,
+    onOpenSettings: () -> Unit = {},
+    onContinueAnyway: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -155,6 +158,11 @@ fun PermissionSetupWizard(
                 )
             }
         }
+        if (permanentlyDenied) {
+            Button(onClick = onOpenSettings) { Text("Open app settings") }
+        }
+        TextButton(onClick = onContinueAnyway) { Text("Continue with limited features") }
+
     }
 }
 

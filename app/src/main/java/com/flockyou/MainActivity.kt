@@ -117,55 +117,69 @@ class MainActivity : FragmentActivity() {
     private lateinit var privilegeMode: PrivilegeMode
     private var isPrivilegedMode by mutableStateOf(false)
 
-    private val requiredPermissions = buildList {
-        add(Manifest.permission.ACCESS_FINE_LOCATION)
-        add(Manifest.permission.ACCESS_COARSE_LOCATION)
-        add(Manifest.permission.READ_PHONE_STATE)
-        add(Manifest.permission.RECORD_AUDIO) // For ultrasonic beacon detection
+    private val criticalPermissions = buildList {
+        add(Manifest.permission.ACCESS_FINE_LOCATION)          // BLE + Wi-Fi scan results need it
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             add(Manifest.permission.BLUETOOTH_SCAN)
             add(Manifest.permission.BLUETOOTH_CONNECT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            add(Manifest.permission.POST_NOTIFICATIONS)
             add(Manifest.permission.NEARBY_WIFI_DEVICES)
         }
     }
 
+    private var permissionsPermanentlyDenied by mutableStateOf(false)
+
     private val backgroundLocationLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        // Whether granted or not, proceed - background location is important but not blocking
-        // Re-check all permissions including background location
-        checkPermissions()
-        if (permissionsGranted) {
-            checkBatteryOptimization()
-            if (!prefs.getBoolean(PREF_GETTING_STARTED_SHOWN, false)) {
-                showGettingStartedDialog = true
-            }
-        }
-    }
+    ) { /* granted or not — do not touch permissionsGranted */ }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        val foregroundGranted = permissions.values.all { it }
-        if (foregroundGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10+ requires background location to be requested separately
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-                return@registerForActivityResult
-            }
+    ) { _ ->
+        val criticalGranted = criticalPermissions.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
-        permissionsGranted = foregroundGranted
+        permissionsGranted = criticalGranted
+
+        // Any critical perm denied with "don't ask again"? Then requesting again
+        // is a no-op — route the user to Settings instead of leaving a dead button.
+        permissionsPermanentlyDenied = !criticalGranted && criticalPermissions.any { perm ->
+            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED &&
+                    !shouldShowRequestPermissionRationale(perm)
+        }
+
         if (permissionsGranted) {
-            checkBatteryOptimization()
-            if (!prefs.getBoolean(PREF_GETTING_STARTED_SHOWN, false)) {
-                showGettingStartedDialog = true
-            }
+            maybeRequestBackgroundLocation()   // best-effort, never blocks
+            onPermissionsSatisfied()
         }
+    }
+
+    private fun onPermissionsSatisfied() {
+        checkBatteryOptimization()
+        if (!prefs.getBoolean(PREF_GETTING_STARTED_SHOWN, false)) showGettingStartedDialog = true
+    }
+
+
+    private fun maybeRequestBackgroundLocation() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) {
+            backgroundLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", packageName, null))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    private fun proceedWithLimitedFeatures() {   // wizard can never trap the user
+        permissionsGranted = true
+        batteryOptimizationChecked = true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -227,7 +241,10 @@ class MainActivity : FragmentActivity() {
                         !permissionsGranted -> {
                             PermissionSetupWizard(
                                 onRequestPermissions = { requestPermissions() },
-                                onRequestBackgroundLocation = { requestBackgroundLocation() }
+                                onRequestBackgroundLocation = { maybeRequestBackgroundLocation() },
+                                permanentlyDenied = permissionsPermanentlyDenied,
+                                onOpenSettings = { openAppSettings() },
+                                onContinueAnyway = { proceedWithLimitedFeatures() },
                             )
                         }
                         !batteryOptimizationChecked -> {
@@ -274,11 +291,9 @@ class MainActivity : FragmentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Re-check battery optimization when returning to app (user may have just changed it)
-        if (permissionsGranted && !batteryOptimizationChecked) {
-            if (isBatteryOptimizationDisabled()) {
-                batteryOptimizationChecked = true
-            }
+        if (!permissionsGranted) checkPermissions()   // add this line
+        if (permissionsGranted && !batteryOptimizationChecked && isBatteryOptimizationDisabled()) {
+            batteryOptimizationChecked = true
         }
     }
 
@@ -298,21 +313,17 @@ class MainActivity : FragmentActivity() {
         }
         startActivity(intent)
     }
-    
+
     private fun checkPermissions() {
-        val foregroundGranted = requiredPermissions.all { permission ->
-            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+        // NOTE: background location is intentionally NOT part of this gate.
+        permissionsGranted = criticalPermissions.all { perm ->
+            ContextCompat.checkSelfPermission(this, perm) == PackageManager.PERMISSION_GRANTED
         }
-        val backgroundLocationGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true // Pre-Q: foreground location permission covers background use
-        }
-        permissionsGranted = foregroundGranted && backgroundLocationGranted
+
     }
     
     private fun requestPermissions() {
-        permissionLauncher.launch(requiredPermissions.toTypedArray())
+        permissionLauncher.launch(criticalPermissions.toTypedArray())
     }
 
     private fun requestBackgroundLocation() {
